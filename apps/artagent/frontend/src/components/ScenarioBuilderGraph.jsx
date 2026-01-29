@@ -2373,35 +2373,30 @@ export default function ScenarioBuilderGraph({
     '🎭', '🎯', '🎪', '🏛️', '🏦', '🏥', '🏢', '📞', '💬', '🤖',
     '🎧', '📱', '💼', '🛒', '🍔', '✈️', '🏨', '🚗', '📚', '⚖️',
   ];
-  const defaultTemplate = useMemo(() => {
-    if (!availableTemplates.length) return null;
-    return (
-      availableTemplates.find((template) => template.id === 'banking') ||
-      availableTemplates.find((template) => template.id === 'default') ||
-      availableTemplates[0]
-    );
+  // Convert available templates to session scenario format for unified display
+  const builtinScenarioItems = useMemo(() => {
+    return availableTemplates.map((template) => ({
+      name: template.name,
+      description: template.description,
+      icon: template.icon,
+      start_agent: template.start_agent,
+      handoff_type: template.handoff_type,
+      handoffs: template.handoffs || [],
+      global_template_vars: template.global_template_vars || {},
+      is_builtin_template: true,
+      template_id: template.id,
+    }));
   }, [availableTemplates]);
+  // sessionScenarios contains only custom (user-created) scenarios
+  // Filter out scenarios that have the same name as builtin templates
   const sessionScenarioItems = useMemo(() => {
-    if (!defaultTemplate) return sessionScenarios;
-    const exists = sessionScenarios.some(
-      (scenario) =>
-        (scenario.name || '').toLowerCase() === (defaultTemplate.name || '').toLowerCase()
+    const builtinNames = new Set(
+      availableTemplates.map((t) => t.name?.toLowerCase())
     );
-    if (exists) return sessionScenarios;
-    return [
-      {
-        name: defaultTemplate.name,
-        description: defaultTemplate.description,
-        icon: defaultTemplate.icon,
-        start_agent: defaultTemplate.start_agent,
-        handoff_type: defaultTemplate.handoff_type,
-        handoffs: defaultTemplate.handoffs || [],
-        global_template_vars: defaultTemplate.global_template_vars || {},
-        is_default_template: true,
-      },
-      ...sessionScenarios,
-    ];
-  }, [defaultTemplate, sessionScenarios]);
+    return sessionScenarios.filter(
+      (scenario) => !builtinNames.has(scenario.name?.toLowerCase())
+    );
+  }, [sessionScenarios, availableTemplates]);
 
   // ─────────────────────────────────────────────────────────────────────────
   // DATA FETCHING
@@ -2445,7 +2440,9 @@ export default function ScenarioBuilderGraph({
       );
       if (response.ok) {
         const data = await response.json();
-        setSessionScenarios(data.scenarios || []);
+        // Use custom_scenarios for the session-specific list (excludes builtin scenarios)
+        // This ensures we only show user-created scenarios in the "Session Scenarios" section
+        setSessionScenarios(data.custom_scenarios || data.scenarios || []);
       }
     } catch (err) {
       logger.error('Failed to fetch session scenarios:', err);
@@ -2612,9 +2609,9 @@ export default function ScenarioBuilderGraph({
         onScenarioCreated(data.config || config);
       }
 
-      // Refresh data to show saved changes immediately
-      fetchSessionScenarios();
-      fetchAvailableAgents();
+      // Refresh data to show saved changes immediately (await to ensure state updates)
+      await fetchSessionScenarios();
+      await fetchAvailableAgents();
       setSuccess(editMode ? 'Scenario updated!' : 'Scenario created!');
       setTimeout(() => setSuccess(null), 3000);
     } catch (err) {
@@ -2653,7 +2650,7 @@ export default function ScenarioBuilderGraph({
     setError(null);
     setSuccess('Scenario reset');
     setTimeout(() => setSuccess(null), 2000);
-    fetchSessionScenarios();
+    await fetchSessionScenarios();
   };
 
   const handleExportScenario = () => {
@@ -2854,38 +2851,30 @@ export default function ScenarioBuilderGraph({
 
         {/* Templates */}
         <Stack spacing={1.2}>
+          {/* Industry Templates (builtin scenarios from backend) */}
           <Box>
             <Stack direction="row" spacing={1} alignItems="center">
               <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700 }}>
-                Session Scenarios
+                Industry Templates
               </Typography>
-              <Chip size="small" label={sessionScenarioItems.length} />
+              <Chip size="small" label={builtinScenarioItems.length} />
             </Stack>
             <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 0.5 }}>
-              Stored in session state. Click to load and edit.
+              Pre-built scenario configurations. Click to load and customize.
             </Typography>
             <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
-              {sessionScenarioItems.length > 0 ? (
-                sessionScenarioItems.map((scenario, index) => {
-                  const scenarioKey = `session:${scenario.name || index}`;
+              {builtinScenarioItems.length > 0 ? (
+                builtinScenarioItems.map((scenario) => {
+                  const scenarioKey = `template:${scenario.template_id || scenario.name}`;
+                  const isSelected = selectedTemplate === scenarioKey;
                   return (
                     <Chip
                       key={scenarioKey}
-                      label={
-                        scenario.is_default_template
-                          ? `${scenario.icon || '🎭'} ${scenario.name || 'Default'} (default)`
-                          : `${scenario.icon || '🎭'} ${scenario.name || 'Custom Scenario'}`
-                      }
+                      label={`${scenario.icon || '📋'} ${scenario.name || 'Template'}`}
                       size="small"
-                      icon={
-                        selectedTemplate === scenarioKey
-                          ? <CheckIcon />
-                          : scenario.is_active
-                            ? <AutoFixHighIcon fontSize="small" />
-                            : <EditIcon fontSize="small" />
-                      }
-                      color={selectedTemplate === scenarioKey ? 'primary' : 'default'}
-                      variant={selectedTemplate === scenarioKey ? 'filled' : 'outlined'}
+                      icon={isSelected ? <CheckIcon /> : undefined}
+                      color={isSelected ? 'primary' : 'default'}
+                      variant={isSelected ? 'filled' : 'outlined'}
                       onClick={() => handleApplySessionScenario(scenario, scenarioKey)}
                       sx={{ cursor: 'pointer' }}
                     />
@@ -2893,7 +2882,50 @@ export default function ScenarioBuilderGraph({
                 })
               ) : (
                 <Typography variant="caption" color="text.secondary">
-                  {sessionId ? 'No session scenarios yet.' : 'Connect a session to load scenarios.'}
+                  Loading templates...
+                </Typography>
+              )}
+            </Stack>
+          </Box>
+
+          {/* Custom Session Scenarios (user-created) */}
+          <Box>
+            <Stack direction="row" spacing={1} alignItems="center">
+              <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700 }}>
+                Custom Scenarios
+              </Typography>
+              <Chip size="small" label={sessionScenarioItems.length} />
+            </Stack>
+            <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 0.5 }}>
+              Your custom scenarios for this session. Click to load and edit.
+            </Typography>
+            <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
+              {sessionScenarioItems.length > 0 ? (
+                sessionScenarioItems.map((scenario, index) => {
+                  const scenarioKey = `session:${scenario.name || index}`;
+                  const isSelected = selectedTemplate === scenarioKey;
+                  return (
+                    <Chip
+                      key={scenarioKey}
+                      label={`${scenario.icon || '🎭'} ${scenario.name || 'Custom Scenario'}`}
+                      size="small"
+                      icon={
+                        isSelected
+                          ? <CheckIcon />
+                          : scenario.is_active
+                            ? <AutoFixHighIcon fontSize="small" />
+                            : undefined
+                      }
+                      color={isSelected ? 'primary' : 'default'}
+                      variant={isSelected ? 'filled' : 'outlined'}
+                      onClick={() => handleApplySessionScenario(scenario, scenarioKey)}
+                      sx={{ cursor: 'pointer' }}
+                    />
+                  );
+                })
+              ) : (
+                <Typography variant="caption" color="text.secondary">
+                  {sessionId ? 'No custom scenarios yet. Save your first scenario!' : 'Connect a session to create scenarios.'}
                 </Typography>
               )}
             </Stack>
