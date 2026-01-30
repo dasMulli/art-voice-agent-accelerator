@@ -91,20 +91,38 @@ def main():
                 client.admin.command("ping")
                 print(f"✓ Connected to DocumentDB with admin credentials (using auth parameters)")
         else:
-            # Use OIDC authentication
+            # Use OIDC authentication (same pattern as main.py)
+            import re
             connection_string = os.getenv("AZURE_COSMOS_CONNECTION_STRING")
+            
+            # Extract cluster name from connection string, stripping any <user>:<password>@ prefix
+            match = re.search(r"mongodb\+srv://(?:<[^>]+>:<[^>]+>@)?([^./?]+)", connection_string)
+            if match:
+                cluster_name = match.group(1)
+            else:
+                raise ValueError(f"Could not determine cluster name from connection string: {connection_string[:50]}...")
+            
             callback = AzureIdentityOIDCCallback()
             
+            # Build OIDC connection string
+            oidc_connection_string = f"mongodb+srv://{cluster_name}.mongocluster.cosmos.azure.com/"
+            
+            # Suppress PyMongo CosmosDB warnings
+            import warnings
+            warnings.filterwarnings("ignore", message=".*CosmosDB.*")
+            
             client = MongoClient(
-                connection_string,
+                oidc_connection_string,
+                connectTimeoutMS=120000,
+                tls=True,
+                retryWrites=False,
                 authMechanism="MONGODB-OIDC",
                 authMechanismProperties={
                     "OIDC_CALLBACK": callback,
-                    "ALLOWED_HOSTS": ["*.mongocluster.cosmos.azure.com"],
                 },
             )
             client.admin.command("ping")
-            print(f"✓ Connected to DocumentDB with OIDC authentication")
+            print(f"✓ Connected to Cosmos DB cluster: {cluster_name}")
     except Exception as e:
         print(f"ERROR: Failed to connect to DocumentDB: {e}", file=sys.stderr)
         sys.exit(1)

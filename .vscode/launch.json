@@ -14,7 +14,8 @@
             "sourceMapPathOverrides": {
             "webpack:///src/*": "${webRoot}/src/*",
             "webpack:///*": "${webRoot}/*"
-            }
+            },
+            "preLaunchTask": "Start Frontend Dev Server"
         },
 
         {

@@ -169,34 +169,20 @@ task_cardapi_provision() {
         return 1
     fi
     
-    # Get admin password and OIDC connection string from Key Vault
-    local admin_password oidc_conn_str
-    admin_password=$(az keyvault secret show --vault-name "$keyvault" --name "cosmos-admin-password" --query value -o tsv 2>/dev/null || echo "")
+    # Get OIDC connection string from Key Vault (uses Azure Managed Identity)
+    local oidc_conn_str
     oidc_conn_str=$(az keyvault secret show --vault-name "$keyvault" --name "cosmos-entra-connection-string" --query value -o tsv 2>/dev/null || echo "")
     
-    if [[ -z "$admin_password" || -z "$oidc_conn_str" ]]; then
-        warn "Admin password or OIDC connection string not available in Key Vault"
+    if [[ -z "$oidc_conn_str" ]]; then
+        warn "OIDC connection string not available in Key Vault"
         footer
         return 1
     fi
     
-    # Extract hostname from OIDC connection string
-    local hostname
-    hostname=$(echo "$oidc_conn_str" | sed -n 's|mongodb+srv://\([^/?]*\).*|\1|p')
+    log "Connecting to Cosmos DB via Azure Identity (OIDC)..."
     
-    if [[ -z "$hostname" ]]; then
-        warn "Could not extract hostname from connection string"
-        footer
-        return 1
-    fi
-    
-    log "Connecting to Cosmos DB as admin user..."
-    
-    # Export environment variables for provisioning script
-    # Pass raw credentials separately - let Python handle URL encoding
-    export COSMOS_ADMIN_USERNAME="cosmosadmin"
-    export COSMOS_ADMIN_PASSWORD="$admin_password"
-    export COSMOS_HOSTNAME="$hostname"
+    # Export environment variables for provisioning script - OIDC auth path
+    export AZURE_COSMOS_CONNECTION_STRING="$oidc_conn_str"
     export AZURE_COSMOS_DATABASE_NAME="cardapi"
     export AZURE_COSMOS_COLLECTION_NAME="declinecodes"
     
@@ -214,17 +200,15 @@ task_cardapi_provision() {
         pip3 install -q -r "$provision_reqs" 2>/dev/null || warn "Failed to install provisioning dependencies"
     fi
     
-    # Run provisioning script (filter out any connection string leaks)
-    if python3 "$provision_script" 2>&1 | grep -v "mongodb+srv://" | sed 's/^/  /'; then
+    # Run provisioning script (prefix output with box border)
+    if python3 "$provision_script" 2>&1 | sed 's/^/│ /'; then
         success "CardAPI data provisioned"
     else
         warn "CardAPI data provisioning may have failed (non-critical)"
     fi
     
-    # Clean up environment variables containing password
-    unset COSMOS_ADMIN_PASSWORD
-    unset COSMOS_ADMIN_USERNAME
-    unset COSMOS_HOSTNAME
+    # Clean up environment variables
+    unset AZURE_COSMOS_CONNECTION_STRING
     
     footer
 }
@@ -563,6 +547,9 @@ task_generate_env_local() {
         return 1
     fi
     
+    # Set box logging for all output
+    export AZD_LOG_IN_BOX=true
+    
     if [[ -f "$env_file" ]]; then
         if is_ci; then
             info "Existing .env.local found (CI mode) - updating App Config settings only"
@@ -571,10 +558,14 @@ task_generate_env_local() {
             success "Updated App Config settings in .env.local"
         else
             log "Existing .env.local found. Update App Config settings only?"
-            if read -r -p "│ Update AZURE_APPCONFIG_* in .env.local? [Y/n]: " choice; then
+            log "(Auto-selecting Y in 10 seconds...)"
+            local choice
+            if read -t 10 -r -p "│ Update AZURE_APPCONFIG_* in .env.local? [Y/n]: " choice; then
                 : # Got input
             else
-                choice="n"
+                echo ""
+                info "No input received, updating App Config settings"
+                choice="Y"
             fi
             if [[ -z "$choice" || "$choice" =~ ^[Yy]$ ]]; then
                 upsert_env_var "$env_file" "AZURE_APPCONFIG_ENDPOINT" "$appconfig_endpoint"
@@ -586,15 +577,14 @@ task_generate_env_local() {
         fi
     else
         log "Generating .env.local for local development..."
-        local prior_log_in_box="${AZD_LOG_IN_BOX:-false}"
-        AZD_LOG_IN_BOX=true
         if generate_minimal_env "$env_file"; then
             success ".env.local created"
         else
             warn "Failed to generate .env.local"
         fi
-        AZD_LOG_IN_BOX="$prior_log_in_box"
     fi
+    
+    export AZD_LOG_IN_BOX=false
     
     footer
 }
