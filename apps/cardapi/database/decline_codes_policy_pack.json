@@ -9,17 +9,6 @@
       "Transaction descriptions for declined/rejected transactions typically begin with 'Rej'"
     ]
   },
-{
-  "metadata": {
-    "title": "{{BANK_NAME}} - Debit Card and ATM Card Declined Reason Codes",
-    "description": "Policy pack for handling card decline codes. Numeric codes processed via {{NUMERIC_PROCESSOR}}, alphanumeric codes via {{ALPHANUMERIC_PROCESSOR}}",
-    "version": "{{VERSION_DATE}}",
-    "notes": [
-      "If decline code is numeric, decline was processed on {{NUMERIC_PROCESSOR}}",
-      "If decline code is alphanumeric, decline was processed on {{ALPHANUMERIC_PROCESSOR}}",
-      "Transaction descriptions for declined/rejected transactions typically begin with 'Rej'"
-    ]
-  },
   "numeric_codes": [
     {
       "code": "{{CODE}}",

@@ -225,7 +225,6 @@ async def load_decline_codes() -> None:
         auth_callback = AzureIdentityTokenCallback(credential)
         auth_properties = {
             "OIDC_CALLBACK": auth_callback,
-            "ALLOWED_HOSTS": ["*.mongocluster.cosmos.azure.com"],
         }
         
         # Build OIDC connection string

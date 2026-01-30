@@ -84,7 +84,7 @@
     {
       "code": "31",
       "description": "Invalid ATM selected",
-      "information": "Bank of America did not generate this decline. Decline is from a non-Bank of America ATM.",
+      "information": "Contoso Bank did not generate this decline. Decline is from a non-Contoso Bank ATM.",
       "actions": ["Use different ATM", "Find nearest ATM"]
     },
     {
