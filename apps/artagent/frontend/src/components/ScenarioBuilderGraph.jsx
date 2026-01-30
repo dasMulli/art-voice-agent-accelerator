@@ -2849,20 +2849,17 @@ export default function ScenarioBuilderGraph({
           </Button>
         </Stack>
 
-        {/* Templates */}
-        <Stack spacing={1.2}>
+        {/* Templates - Horizontal layout */}
+        <Stack direction="row" spacing={3} sx={{ flexWrap: 'wrap' }}>
           {/* Industry Templates (builtin scenarios from backend) */}
-          <Box>
+          <Box sx={{ flex: '1 1 auto', minWidth: 200 }}>
             <Stack direction="row" spacing={1} alignItems="center">
               <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700 }}>
                 Industry Templates
               </Typography>
               <Chip size="small" label={builtinScenarioItems.length} />
             </Stack>
-            <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 0.5 }}>
-              Pre-built scenario configurations. Click to load and customize.
-            </Typography>
-            <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
+            <Stack direction="row" spacing={0.5} alignItems="center" flexWrap="wrap" sx={{ mt: 0.5 }}>
               {builtinScenarioItems.length > 0 ? (
                 builtinScenarioItems.map((scenario) => {
                   const scenarioKey = `template:${scenario.template_id || scenario.name}`;
@@ -2876,30 +2873,27 @@ export default function ScenarioBuilderGraph({
                       color={isSelected ? 'primary' : 'default'}
                       variant={isSelected ? 'filled' : 'outlined'}
                       onClick={() => handleApplySessionScenario(scenario, scenarioKey)}
-                      sx={{ cursor: 'pointer' }}
+                      sx={{ cursor: 'pointer', mb: 0.5 }}
                     />
                   );
                 })
               ) : (
                 <Typography variant="caption" color="text.secondary">
-                  Loading templates...
+                  Loading...
                 </Typography>
               )}
             </Stack>
           </Box>
 
           {/* Custom Session Scenarios (user-created) */}
-          <Box>
+          <Box sx={{ flex: '1 1 auto', minWidth: 200 }}>
             <Stack direction="row" spacing={1} alignItems="center">
               <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700 }}>
                 Custom Scenarios
               </Typography>
               <Chip size="small" label={sessionScenarioItems.length} />
             </Stack>
-            <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 0.5 }}>
-              Your custom scenarios for this session. Click to load and edit.
-            </Typography>
-            <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
+            <Stack direction="row" spacing={0.5} alignItems="center" flexWrap="wrap" sx={{ mt: 0.5 }}>
               {sessionScenarioItems.length > 0 ? (
                 sessionScenarioItems.map((scenario, index) => {
                   const scenarioKey = `session:${scenario.name || index}`;
@@ -2919,13 +2913,13 @@ export default function ScenarioBuilderGraph({
                       color={isSelected ? 'primary' : 'default'}
                       variant={isSelected ? 'filled' : 'outlined'}
                       onClick={() => handleApplySessionScenario(scenario, scenarioKey)}
-                      sx={{ cursor: 'pointer' }}
+                      sx={{ cursor: 'pointer', mb: 0.5 }}
                     />
                   );
                 })
               ) : (
                 <Typography variant="caption" color="text.secondary">
-                  {sessionId ? 'No custom scenarios yet. Save your first scenario!' : 'Connect a session to create scenarios.'}
+                  {sessionId ? 'Save to create custom scenarios' : 'No session'}
                 </Typography>
               )}
             </Stack>
