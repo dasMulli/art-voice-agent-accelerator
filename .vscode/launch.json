@@ -5,7 +5,7 @@
     "version": "0.2.0",
     "configurations": [
         { // Added React Debug Configuration
-            "name": "[RT Agent] React App: Browser Debug",
+            "name": "[ART Agent] React App: Browser Debug",
             "type": "msedge", // or "chrome"
             "request": "launch",
             "url": "http://localhost:5173", // Ensure this matches your Vite dev server port
@@ -19,7 +19,7 @@
         },
 
         {
-            "name": "[RT Agent] Python Debugger: FastAPI",
+            "name": "[ART Agent] Python Debugger: FastAPI",
             "type": "debugpy",
             "request": "launch",
             "module": "uvicorn",
@@ -65,10 +65,11 @@
     ],
     "compounds": [
         {
-            "name": "[All] RT Agent + Card API",
+            "name": "[All] ART Agent + Card API",
             "configurations": [
-                "[RT Agent] Python Debugger: FastAPI",
-                "[Card API] Python Debugger: FastAPI"
+                "[ART Agent] React App: Browser Debug"
+                "[ART Agent] Python Debugger: FastAPI",
+                "[Card API] Python Debugger: FastAPI",
             ],
             "stopAll": true
         }
