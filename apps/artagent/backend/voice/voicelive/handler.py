@@ -1769,6 +1769,10 @@ class VoiceLiveSDKHandler:
             # Ask for a model response considering all history (audio + text)
             await self._connection.send(ClientEventResponseCreate())
 
+            # Echo user message back to frontend so it appears in the chat UI
+            if self._messenger:
+                await self._messenger.send_user_message(text)
+
             logger.info(
                 "Forwarded user text message (%s chars) | session=%s",
                 len(text),
