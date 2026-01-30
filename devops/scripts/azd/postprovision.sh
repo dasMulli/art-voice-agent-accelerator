@@ -3,12 +3,11 @@
 # 🎯 Azure Developer CLI Post-Provisioning Script
 # ============================================================================
 # Runs after Terraform provisioning. Handles tasks that CANNOT be in Terraform:
-#   1. Cosmos DB initialization (seeding data)
+#   1. CardAPI data provisioning (seeding Cosmos DB)
 #   2. ACS phone number provisioning
 #   3. App Config URL updates (known only after deploy)
-#   4. App Config settings sync
-#   5. Local development environment setup
-#   6. EasyAuth configuration (optional, interactive)
+#   4. Local development environment setup
+#   5. EasyAuth configuration (optional, interactive)
 # ============================================================================
 
 set -euo pipefail
@@ -151,6 +150,67 @@ trigger_config_refresh() {
     
 #     footer
 # }
+
+# ============================================================================
+# Task 1: CardAPI Data Provisioning
+# ============================================================================
+
+task_cardapi_provision() {
+    header "💾 Task 1: CardAPI Data Provisioning"
+    
+    local rg keyvault
+    rg=$(azd_get "AZURE_RESOURCE_GROUP")
+    keyvault=$(az keyvault list --resource-group "$rg" --query "[0].name" -o tsv 2>/dev/null || echo "")
+    
+    if [[ -z "$keyvault" ]]; then
+        warn "Could not find Key Vault"
+        footer
+        return 1
+    fi
+    
+    # Get OIDC connection string from Key Vault (uses Azure Managed Identity)
+    local oidc_conn_str
+    oidc_conn_str=$(az keyvault secret show --vault-name "$keyvault" --name "cosmos-entra-connection-string" --query value -o tsv 2>/dev/null || echo "")
+    
+    if [[ -z "$oidc_conn_str" ]]; then
+        warn "OIDC connection string not available in Key Vault"
+        footer
+        return 1
+    fi
+    
+    log "Connecting to Cosmos DB via Azure Identity (OIDC)..."
+    
+    # Export environment variables for provisioning script - OIDC auth path
+    export AZURE_COSMOS_CONNECTION_STRING="$oidc_conn_str"
+    export AZURE_COSMOS_DATABASE_NAME="cardapi"
+    export AZURE_COSMOS_COLLECTION_NAME="declinecodes"
+    
+    local provision_script="$(pwd)/apps/cardapi/scripts/provision_data.py"
+    if [[ ! -f "$provision_script" ]]; then
+        warn "Provisioning script not found: $provision_script"
+        footer
+        return 1
+    fi
+    
+    # Install provisioning script dependencies
+    local provision_reqs="$(pwd)/apps/cardapi/scripts/requirements.txt"
+    if [[ -f "$provision_reqs" ]]; then
+        log "Installing provisioning dependencies..."
+        pip3 install -q -r "$provision_reqs" 2>/dev/null || warn "Failed to install provisioning dependencies"
+    fi
+    
+    # Run provisioning script (prefix output with box border)
+    if python3 "$provision_script" 2>&1 | sed 's/^/│ /'; then
+        success "CardAPI data provisioned"
+    else
+        warn "CardAPI data provisioning may have failed (non-critical)"
+    fi
+    
+    # Clean up environment variables
+    unset AZURE_COSMOS_CONNECTION_STRING
+    
+    footer
+}
 
 # ============================================================================
 # Task 2: ACS Phone Number Configuration
@@ -347,23 +407,16 @@ show_summary() {
 }
 
 # ============================================================================
-# Task 4: Sync App Configuration Settings
+# Task 4: Sync Infrastructure Keys to App Configuration
 # ============================================================================
 
 task_sync_appconfig() {
-    header "📦 Task 4: App Configuration Settings"
+    header "📦 Task 4: Sync Infrastructure Keys"
     
     local sync_script="$HELPERS_DIR/sync-appconfig.sh"
-    local config_file="$SCRIPT_DIR/../../../config/appconfig.json"
     
     if [[ ! -f "$sync_script" ]]; then
         warn "sync-appconfig.sh not found, skipping"
-        footer
-        return 0
-    fi
-    
-    if [[ ! -f "$config_file" ]]; then
-        warn "config/appconfig.json not found, skipping"
         footer
         return 0
     fi
@@ -378,11 +431,11 @@ task_sync_appconfig() {
         return 1
     fi
     
-    log "Syncing app settings from config/appconfig.json..."
-    if AZD_LOG_IN_BOX=true bash "$sync_script" --endpoint "$endpoint" --label "$label" --config "$config_file"; then
-        success "App settings synced"
+    log "Syncing Terraform outputs to App Configuration..."
+    if AZD_LOG_IN_BOX=true bash "$sync_script" --endpoint "$endpoint" --label "$label"; then
+        success "Infrastructure keys synced"
     else
-        warn "Some settings may have failed"
+        warn "Some keys may have failed to sync"
     fi
     
     footer
@@ -417,6 +470,12 @@ task_generate_env_local() {
         return 1
     fi
     
+    # Set box logging for all output
+    export AZD_LOG_IN_BOX=true
+    
+    # Set box logging for all output
+    export AZD_LOG_IN_BOX=true
+    
     if [[ -f "$env_file" ]]; then
         if is_ci; then
             info "Existing .env.local found (CI mode) - updating App Config settings only"
@@ -425,10 +484,14 @@ task_generate_env_local() {
             success "Updated App Config settings in .env.local"
         else
             log "Existing .env.local found. Update App Config settings only?"
-            if read -r -p "│ Update AZURE_APPCONFIG_* in .env.local? [Y/n]: " choice; then
+            log "(Auto-selecting Y in 10 seconds...)"
+            local choice
+            if read -t 10 -r -p "│ Update AZURE_APPCONFIG_* in .env.local? [Y/n]: " choice; then
                 : # Got input
             else
-                choice="n"
+                echo ""
+                info "No input received, updating App Config settings"
+                choice="Y"
             fi
             if [[ -z "$choice" || "$choice" =~ ^[Yy]$ ]]; then
                 upsert_env_var "$env_file" "AZURE_APPCONFIG_ENDPOINT" "$appconfig_endpoint"
@@ -440,15 +503,14 @@ task_generate_env_local() {
         fi
     else
         log "Generating .env.local for local development..."
-        local prior_log_in_box="${AZD_LOG_IN_BOX:-false}"
-        AZD_LOG_IN_BOX=true
         if generate_minimal_env "$env_file"; then
             success ".env.local created"
         else
             warn "Failed to generate .env.local"
         fi
-        AZD_LOG_IN_BOX="$prior_log_in_box"
     fi
+    
+    export AZD_LOG_IN_BOX=false
     
     footer
 }
@@ -572,7 +634,8 @@ main() {
     is_ci && info "CI/CD mode" || info "Interactive mode"
     footer
     
-    # task_cosmos_init || true
+    #task_cosmos_init || true
+    task_cardapi_provision || true
     task_phone_number || true
     task_update_urls || true
     task_sync_appconfig || true
