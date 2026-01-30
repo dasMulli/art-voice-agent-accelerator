@@ -348,21 +348,30 @@ function RealTimeVoiceApp() {
 
   // Fetch all session scenarios (for custom scenarios list)
   const fetchSessionScenarioConfig = useCallback(async (targetSessionId = sessionId) => {
-    if (!targetSessionId) return;
+    if (!targetSessionId) return null;
     try {
       const res = await fetch(
-        `${API_BASE_URL}/api/v1/scenario-builder/session/${encodeURIComponent(targetSessionId)}/scenarios`
+        `${API_BASE_URL}/api/v1/scenario-builder/session/${encodeURIComponent(targetSessionId)}/scenarios`,
+        {
+          // Prevent browser caching to ensure fresh data after scenario changes
+          headers: { 'Cache-Control': 'no-cache' },
+        }
       );
       if (res.status === 404) {
         setSessionScenarioConfig(null);
-        return;
+        return null;
       }
-      if (!res.ok) return;
+      if (!res.ok) return null;
       const data = await res.json();
-      // Store the scenarios array
-      setSessionScenarioConfig(data.scenarios && data.scenarios.length > 0 ? data : null);
+      // Store the scenarios array - check both scenarios and custom_scenarios
+      // to handle case where builtin_scenarios is empty but custom exists
+      const hasScenarios = (data.scenarios && data.scenarios.length > 0) ||
+        (data.custom_scenarios && data.custom_scenarios.length > 0);
+      setSessionScenarioConfig(hasScenarios ? data : null);
+      return data;
     } catch (err) {
       appendLog(`Session scenarios fetch failed: ${err.message}`);
+      return null;
     }
   }, [sessionId, appendLog]);
 
@@ -2112,6 +2121,14 @@ function RealTimeVoiceApp() {
           return prev;
         }
 
+        // If the speaker changed (e.g., after handoff), create a new message
+        // instead of overwriting the previous agent's bubble
+        if (patch.speaker && current.speaker && patch.speaker !== current.speaker) {
+          const base = typeof initial === "function" ? initial() : initial;
+          const newMsg = base ? { ...base, ...patch } : { ...patch, turnId: `${turnId}_${patch.speaker}` };
+          return [...prev, newMsg];
+        }
+
         const next = [...prev];
         next[index] = { ...current, ...patch, turnId };
         return next;
@@ -2368,6 +2385,9 @@ function RealTimeVoiceApp() {
               text: reasonText,
               ts: payload.ts || payload.timestamp,
             });
+            // Reset streaming state on agent handoff to force new bubble for new agent
+            assistantStreamGenerationRef.current += 1;
+            assistantStreamBufferRef.current = { turnId: null, text: "" };
           }
           if (label !== "System" && label !== "User") {
             currentAgentRef.current = label;
@@ -3145,9 +3165,11 @@ function RealTimeVoiceApp() {
           );
         } else {
           setMessages((prev) => {
+            // Only finalize a streaming message if it belongs to the same speaker
+            // This prevents handoff responses from overwriting previous agent's bubbles
             for (let idx = prev.length - 1; idx >= 0; idx -= 1) {
               const candidate = prev[idx];
-              if (candidate?.streaming) {
+              if (candidate?.streaming && candidate?.speaker === assistantSpeaker) {
                 return prev.map((m, i) =>
                   i === idx
                     ? {
@@ -4609,15 +4631,14 @@ function RealTimeVoiceApp() {
           };
         });
       }}
-      onScenarioCreated={(scenarioConfig) => {
+      onScenarioCreated={async (scenarioConfig) => {
         appendLog(`🎭 Scenario created: ${scenarioConfig.name || 'Custom Scenario'}`);
         appendSystemMessage(`🎭 Scenario "${scenarioConfig.name || 'Custom'}" is now active`, {
           tone: "success",
           statusCaption: `Agents: ${scenarioConfig.agents?.length || 0} · Handoffs: ${scenarioConfig.handoffs?.length || 0}`,
           statusLabel: "Scenario Active",
         });
-        // Refresh scenario configuration and set to the proper custom scenario key
-        fetchSessionScenarioConfig();
+        // Set the scenario key first to update UI immediately
         const scenarioKey = scenarioConfig.name 
           ? `custom_${scenarioConfig.name.replace(/\s+/g, '_').toLowerCase()}`
           : 'custom';
@@ -4627,16 +4648,17 @@ function RealTimeVoiceApp() {
           currentAgentRef.current = scenarioConfig.start_agent;
           setSelectedAgentName(scenarioConfig.start_agent);
         }
+        // Refresh scenario configuration and await to ensure state is updated
+        await fetchSessionScenarioConfig();
       }}
-      onScenarioUpdated={(scenarioConfig) => {
+      onScenarioUpdated={async (scenarioConfig) => {
         appendLog(`✏️ Scenario updated: ${scenarioConfig.name || 'Custom Scenario'}`);
         appendSystemMessage(`🎭 Scenario "${scenarioConfig.name || 'Custom'}" updated`, {
           tone: "success",
           statusCaption: `Agents: ${scenarioConfig.agents?.length || 0} · Handoffs: ${scenarioConfig.handoffs?.length || 0}`,
           statusLabel: "Scenario Updated",
         });
-        fetchSessionScenarioConfig();
-        // Set to the proper custom scenario key
+        // Set to the proper custom scenario key first to update UI immediately
         const scenarioKey = scenarioConfig.name 
           ? `custom_${scenarioConfig.name.replace(/\s+/g, '_').toLowerCase()}`
           : 'custom';
@@ -4646,6 +4668,8 @@ function RealTimeVoiceApp() {
           currentAgentRef.current = scenarioConfig.start_agent;
           setSelectedAgentName(scenarioConfig.start_agent);
         }
+        // Refresh scenario configuration and await to ensure state is updated
+        await fetchSessionScenarioConfig();
       }}
     />
 

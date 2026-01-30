@@ -194,6 +194,8 @@ APPCONFIG_KEY_MAP: dict[str, str] = {
     "app/monitoring/metrics-interval": "METRICS_COLLECTION_INTERVAL",
     "app/monitoring/pool-metrics-interval": "POOL_METRICS_INTERVAL",
     # Application Services
+    "app/cardapi/url": "CARDAPI_URL",
+    # Application Services
     "app/cardapi/mcp-url": "CARDAPI_MCP_URL",
     # Environment
     "app/environment": "ENVIRONMENT",
