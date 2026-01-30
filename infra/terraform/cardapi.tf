@@ -139,7 +139,7 @@ resource "azapi_resource" "cardapi_backend_db_user" {
 # ============================================================================
 
 resource "azurerm_container_app" "cardapi_backend" {
-  name                         = "${var.name}-cardapi-be-${local.resource_token}"
+  name                         = "cardapi-be-${local.resource_token}"
   container_app_environment_id = azurerm_container_app_environment.main.id
   resource_group_name          = azurerm_resource_group.main.name
   revision_mode                = "Single"
@@ -232,7 +232,7 @@ resource "azurerm_container_app" "cardapi_backend" {
 # ============================================================================
 
 resource "azurerm_container_app" "cardapi_mcp" {
-  name                         = "${var.name}-cardapi-mcp-${local.resource_token}"
+  name                         = "cardapi-mcp-${local.resource_token}"
   container_app_environment_id = azurerm_container_app_environment.main.id
   resource_group_name          = azurerm_resource_group.main.name
   revision_mode                = "Single"
