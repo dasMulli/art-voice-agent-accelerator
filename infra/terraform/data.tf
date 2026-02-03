@@ -65,6 +65,7 @@ resource "azapi_resource" "mongoCluster" {
   type                      = "Microsoft.DocumentDB/mongoClusters@2025-08-01-preview"
   parent_id                 = azurerm_resource_group.main.id
   schema_validation_enabled = false
+  ignore_missing_property   = true
   name                      = local.resource_names.cosmos
   location                  = var.location
   body = {
@@ -104,9 +105,10 @@ resource "azapi_resource" "mongoCluster" {
   }
   tags = local.tags
 
-  # Suppress diffs for allowedModes array ordering
+  # Suppress diffs for volatile properties
   lifecycle {
     ignore_changes = [
+      tags,
       body["properties"]["authConfig"]["allowedModes"],
       output["properties"]["authConfig"]["allowedModes"],
       output["properties"]["backup"]["earliestRestoreTime"],
@@ -139,18 +141,22 @@ resource "azapi_resource" "mongo_firewall_all" {
 
 
 # Store Entra ID connection string in Key Vault
+# NOTE: The base connectionString has user:password placeholders and SCRAM-SHA-256,
+# which are incompatible with OIDC. We build a clean OIDC connection string instead.
 resource "azurerm_key_vault_secret" "cosmos_entra_connection_string" {
   name         = "cosmos-entra-connection-string"
-  value        = "${data.azapi_resource.mongo_cluster_info.output.properties.connectionString}?authSource=%24external&authMechanism=MONGODB-OIDC"
+  value        = "mongodb+srv://${azapi_resource.mongoCluster.name}.mongocluster.cosmos.azure.com/?tls=true&authMechanism=MONGODB-OIDC&retrywrites=false&maxIdleTimeMS=120000"
   key_vault_id = azurerm_key_vault.main.id
 
   depends_on = [azurerm_role_assignment.keyvault_admin, data.azapi_resource.mongo_cluster_info]
 }
 
 # Generate random password for Cosmos DB admin
+# NOTE: Limited special chars to avoid URL/connection string issues
 resource "random_password" "cosmos_admin" {
-  length  = 16
-  special = true
+  length           = 24
+  special          = true
+  override_special = "!#$^*()-_=+"
 }
 
 # Store Cosmos DB admin password in Key Vault

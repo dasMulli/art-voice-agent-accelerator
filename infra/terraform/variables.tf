@@ -85,6 +85,12 @@ variable "acs_data_location" {
   }
 }
 
+variable "enable_acs_email" {
+  description = "Enable Azure Communication Services Email integration (optional, not required for voice)"
+  type        = bool
+  default     = true  # Backwards compatible - existing deployments have email resources
+}
+
 variable "disable_local_auth" {
   description = "Disable local authentication and use Azure AD/managed identity only"
   type        = bool
@@ -186,12 +192,12 @@ variable "model_deployments" {
       sku_name = "DataZoneStandard"
       capacity = 50
     },
-    {
-      name     = "gpt-5.1"
-      version  = "2025-11-13"
-      sku_name = "DataZoneStandard"
-      capacity = 150
-    },
+    # {
+    #   name     = "gpt-5.1"
+    #   version  = "2025-11-13"
+    #   sku_name = "DataZoneStandard"
+    #   capacity = 150
+    # },
     {
       name     = "text-embedding-3-large"
       version  = "1"
