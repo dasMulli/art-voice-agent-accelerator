@@ -170,42 +170,43 @@ count=0
 errors=0
 
 # Azure OpenAI
-set_kv "azure/openai/endpoint" "$(get_azd_value AZURE_OPENAI_ENDPOINT)" && ((count++)) || ((errors++))
-set_kv "azure/openai/deployment-id" "$(get_azd_value AZURE_OPENAI_CHAT_DEPLOYMENT_ID)" && ((count++)) || ((errors++))
-set_kv "azure/openai/api-version" "$(get_azd_value AZURE_OPENAI_API_VERSION)" && ((count++)) || ((errors++))
+set_kv "azure/openai/endpoint" "$(get_azd_value AZURE_OPENAI_ENDPOINT)" && ((++count)) || ((++errors))
+set_kv "azure/openai/deployment-id" "$(get_azd_value AZURE_OPENAI_CHAT_DEPLOYMENT_ID)" && ((++count)) || ((++errors))
+set_kv "azure/openai/api-version" "$(get_azd_value AZURE_OPENAI_API_VERSION)" && ((++count)) || ((++errors))
 
 # Azure Speech
-set_kv "azure/speech/endpoint" "$(get_azd_value AZURE_SPEECH_ENDPOINT)" && ((count++)) || ((errors++))
-set_kv "azure/speech/region" "$(get_azd_value AZURE_SPEECH_REGION)" && ((count++)) || ((errors++))
-set_kv "azure/speech/resource-id" "$(get_azd_value AZURE_SPEECH_RESOURCE_ID)" && ((count++)) || ((errors++))
+set_kv "azure/speech/endpoint" "$(get_azd_value AZURE_SPEECH_ENDPOINT)" && ((++count)) || ((++errors))
+set_kv "azure/speech/region" "$(get_azd_value AZURE_SPEECH_REGION)" && ((++count)) || ((++errors))
+set_kv "azure/speech/resource-id" "$(get_azd_value AZURE_SPEECH_RESOURCE_ID)" && ((++count)) || ((++errors))
 
 # Azure Communication Services
-set_kv "azure/acs/endpoint" "$(get_azd_value ACS_ENDPOINT)" && ((count++)) || ((errors++))
-set_kv "azure/acs/immutable-id" "$(get_azd_value ACS_IMMUTABLE_ID)" && ((count++)) || ((errors++))
-set_kv_ref "azure/acs/connection-string" "acs-connection-string" && ((count++)) || ((errors++))
-set_kv "azure/acs/email-sender-address" "$(get_azd_value AZURE_EMAIL_SENDER_ADDRESS)" && ((count++)) || ((errors++))
+set_kv "azure/acs/endpoint" "$(get_azd_value ACS_ENDPOINT)" && ((++count)) || ((++errors))
+set_kv "azure/acs/immutable-id" "$(get_azd_value ACS_IMMUTABLE_ID)" && ((++count)) || ((++errors))
+set_kv_ref "azure/acs/connection-string" "acs-connection-string" && ((++count)) || ((++errors))
+set_kv "azure/acs/email-sender-address" "$(get_azd_value AZURE_EMAIL_SENDER_ADDRESS)" && ((++count)) || ((++errors))
 
 # Redis
-set_kv "azure/redis/hostname" "$(get_azd_value REDIS_HOSTNAME)" && ((count++)) || ((errors++))
-set_kv "azure/redis/port" "$(get_azd_value REDIS_PORT)" && ((count++)) || ((errors++))
+set_kv "azure/redis/hostname" "$(get_azd_value REDIS_HOSTNAME)" && ((++count)) || ((++errors))
+set_kv "azure/redis/port" "$(get_azd_value REDIS_PORT)" && ((++count)) || ((++errors))
 
 # Cosmos DB
-set_kv "azure/cosmos/database-name" "$(get_azd_value AZURE_COSMOS_DATABASE_NAME)" && ((count++)) || ((errors++))
-set_kv "azure/cosmos/collection-name" "$(get_azd_value AZURE_COSMOS_COLLECTION_NAME)" && ((count++)) || ((errors++))
+# Using ++count to overcome an occasional bug in count and errors when the value is zero
+set_kv "azure/cosmos/database-name" "$(get_azd_value AZURE_COSMOS_DATABASE_NAME)" && ((++count)) || ((++errors))
+set_kv "azure/cosmos/collection-name" "$(get_azd_value AZURE_COSMOS_COLLECTION_NAME)" && ((++count)) || ((++errors))
 # Cosmos Entra connection string (Key Vault reference with OIDC auth for managed identity)
-set_kv_ref "azure/cosmos/connection-string" "cosmos-entra-connection-string" && ((count++)) || ((errors++))
+set_kv_ref "azure/cosmos/connection-string" "cosmos-entra-connection-string" && ((++count)) || ((++errors))
 
 # Storage
-set_kv "azure/storage/account-name" "$(get_azd_value AZURE_STORAGE_ACCOUNT_NAME)" && ((count++)) || ((errors++))
-set_kv "azure/storage/container-url" "$(get_azd_value AZURE_STORAGE_CONTAINER_URL)" && ((count++)) || ((errors++))
+set_kv "azure/storage/account-name" "$(get_azd_value AZURE_STORAGE_ACCOUNT_NAME)" && ((++count)) || ((++errors))
+set_kv "azure/storage/container-url" "$(get_azd_value AZURE_STORAGE_CONTAINER_URL)" && ((++count)) || ((++errors))
 
 # App Insights
-set_kv "azure/appinsights/connection-string" "$(get_azd_value APPLICATIONINSIGHTS_CONNECTION_STRING)" && ((count++)) || ((errors++))
+set_kv "azure/appinsights/connection-string" "$(get_azd_value APPLICATIONINSIGHTS_CONNECTION_STRING)" && ((++count)) || ((++errors))
 
 # Voice Live (optional)
-set_kv "azure/voicelive/endpoint" "$(get_azd_value AZURE_VOICELIVE_ENDPOINT)" && ((count++)) || ((errors++))
-set_kv "azure/voicelive/model" "$(get_azd_value AZURE_VOICELIVE_MODEL)" && ((count++)) || ((errors++))
-set_kv "azure/voicelive/resource-id" "$(get_azd_value AZURE_VOICELIVE_RESOURCE_ID)" && ((count++)) || ((errors++))
+set_kv "azure/voicelive/endpoint" "$(get_azd_value AZURE_VOICELIVE_ENDPOINT)" && ((++count)) || ((++errors))
+set_kv "azure/voicelive/model" "$(get_azd_value AZURE_VOICELIVE_MODEL)" && ((++count)) || ((++errors))
+set_kv "azure/voicelive/resource-id" "$(get_azd_value AZURE_VOICELIVE_RESOURCE_ID)" && ((++count)) || ((++errors))
 
 # AI Foundry (for Evaluations SDK)
 # Derive project endpoint from project_id since azapi doesn't expose it directly
@@ -218,7 +219,7 @@ if [[ -n "$ai_foundry_project_id" ]]; then
     project_name=$(echo "$ai_foundry_project_id" | sed -n 's|.*/projects/\([^/]*\)$|\1|p')
     if [[ -n "$account_name" && -n "$project_name" ]]; then
         ai_foundry_project_endpoint="https://${account_name}.services.ai.azure.com/api/projects/${project_name}"
-        set_kv "azure/ai-foundry/project-endpoint" "$ai_foundry_project_endpoint" && ((count++)) || ((errors++))
+        set_kv "azure/ai-foundry/project-endpoint" "$ai_foundry_project_endpoint" && ((++count)) || ((++errors))
     fi
 fi
 
@@ -265,7 +266,7 @@ fi
 
 if [[ -n "$cardapi_url" ]]; then
     # Backend expects this key to load MCP_SERVER_CARDAPI_URL
-    set_kv "app/mcp/servers/cardapi/url" "$cardapi_url" && ((count++)) || ((errors++))
+    set_kv "app/mcp/servers/cardapi/url" "$cardapi_url" && ((++count)) || ((++errors))
 else
     warn "CardAPI MCP URL not configured (set MCP_SERVER_CARDAPI_URL or deploy cardapi service)"
 fi
@@ -274,17 +275,17 @@ fi
 cardapi_auth_enabled=$(get_azd_value CARDAPI_MCP_AUTH_ENABLED)
 cardapi_app_id=$(get_azd_value CARDAPI_MCP_APP_ID)
 if [[ -n "$cardapi_auth_enabled" ]]; then
-    set_kv "app/mcp/servers/cardapi/auth-enabled" "$cardapi_auth_enabled" && ((count++)) || ((errors++))
+    set_kv "app/mcp/servers/cardapi/auth-enabled" "$cardapi_auth_enabled" && ((++count)) || ((++errors))
 fi
 if [[ -n "$cardapi_app_id" ]]; then
-    set_kv "app/mcp/servers/cardapi/app-id" "$cardapi_app_id" && ((count++)) || ((errors++))
+    set_kv "app/mcp/servers/cardapi/app-id" "$cardapi_app_id" && ((++count)) || ((++errors))
 fi
 
 # Environment metadata
-set_kv "app/environment" "$(get_azd_value AZURE_ENV_NAME)" && ((count++)) || ((errors++))
+set_kv "app/environment" "$(get_azd_value AZURE_ENV_NAME)" && ((++count)) || ((++errors))
 
 # Sentinel for refresh trigger
-set_kv "app/sentinel" "v$(date +%s)" && ((count++)) || ((errors++))
+set_kv "app/sentinel" "v$(date +%s)" && ((++count)) || ((++errors))
 
 echo "├─────────────────────────────────────────────────────────────"
 if [[ $errors -gt 0 ]]; then
