@@ -138,12 +138,16 @@ class CosmosDBMongoCoreManager:
                 # Setup Azure Identity credential for OIDC
                 credential = get_credential()
                 auth_callback = AzureIdentityTokenCallback(credential)
+
+                # NOTE: pymongo's OIDC host allowlist (authMechanismProperties
+                # ["ALLOWED_HOSTS"]) is ONLY valid with a human/interactive callback
+                # (OIDC_HUMAN_CALLBACK). Passing it alongside the machine OIDC_CALLBACK
+                # used here raises "ALLOWED_HOSTS is only valid with OIDC_HUMAN_CALLBACK".
+                # The allowlist is a browser-redirect safety check that does not apply
+                # to machine/managed-identity workflows, so we omit it entirely.
                 auth_properties = {
                     "OIDC_CALLBACK": auth_callback,
                 }
-                
-                # Allow Cosmos DB MongoDB cluster hosts for OIDC
-                os.environ.setdefault("MONGODB_OIDC_ALLOWED_HOSTS", "*.mongocluster.cosmos.azure.com")
 
 
                 # Build connection string for OIDC with required parameters

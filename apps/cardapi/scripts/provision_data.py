@@ -114,14 +114,22 @@ def main():
             
             # Build OIDC connection string
             oidc_connection_string = f"mongodb+srv://{cluster_name}.mongocluster.cosmos.azure.com/"
-            
+
+            # NOTE: pymongo's OIDC host allowlist (authMechanismProperties
+            # ["ALLOWED_HOSTS"]) is ONLY valid with a human/interactive callback
+            # (OIDC_HUMAN_CALLBACK). Passing it with the machine OIDC_CALLBACK used
+            # here raises "ALLOWED_HOSTS is only valid with OIDC_HUMAN_CALLBACK". The
+            # allowlist is a browser-redirect safety check that does not apply to
+            # machine/managed-identity workflows, so we omit it entirely.
             client = MongoClient(
                 oidc_connection_string,
                 connectTimeoutMS=120000,
                 tls=True,
                 retryWrites=False,
                 authMechanism="MONGODB-OIDC",
-                authMechanismProperties={"OIDC_CALLBACK": oidc_callback},
+                authMechanismProperties={
+                    "OIDC_CALLBACK": oidc_callback,
+                },
             )
             client.admin.command("ping")
             print(f"✓ Connected to Cosmos DB cluster: {cluster_name}")

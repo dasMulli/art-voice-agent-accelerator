@@ -85,6 +85,8 @@ import DeleteIcon from '@mui/icons-material/Delete';
 
 import { API_BASE_URL } from '../config/constants.js';
 import logger from '../utils/logger.js';
+import { fetchFoundryModels, deriveModelOptions, MANAGED_VOICELIVE_OPTIONS } from '../utils/foundryModels.js';
+import { OrchestrationDiagramModal } from './OrchestrationDiagram.jsx';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // STYLES
@@ -209,6 +211,52 @@ const VOICELIVE_MODEL_PRESETS = [
   { id: 'phi4-mini', label: 'phi4-mini' },
 ];
 
+// Next-gen native-audio (realtime) models that are only offered in the dropdown
+// when the connected Azure region actually has them deployed (cross-checked
+// against the /models deployment list). Advertising a model the region can't
+// serve would make connect() fail, so these stay hidden until confirmed.
+const REGION_GATED_VOICELIVE_PRESETS = [
+  { id: 'gpt-realtime-2', label: 'gpt-realtime-2' },
+  { id: 'gpt-realtime-1.5', label: 'gpt-realtime-1.5' },
+];
+
+// Voice Live BYOM (Bring Your Own Model) profile modes. Opt-in, VoiceLive only.
+// Selecting a mode adds the `profile` query param at connect() so the session
+// uses a model deployment you brought yourself (chosen via the Model dropdown,
+// which lists your connected Foundry resource). '' = disabled (managed VoiceLive).
+// See: https://learn.microsoft.com/azure/ai-services/speech-service/how-to-bring-your-own-model
+const BYOM_MODES = [
+  { id: '', label: 'Off (managed VoiceLive)' },
+  { id: 'byom-azure-openai-realtime', label: 'Azure OpenAI realtime (gpt-realtime, gpt-realtime-mini)' },
+  { id: 'byom-azure-openai-chat-completion', label: 'Azure OpenAI / Foundry chat-completion (gpt-5.x, grok-4, …)' },
+  { id: 'byom-foundry-anthropic-messages', label: 'Foundry Anthropic messages — preview (claude-sonnet/haiku)' },
+];
+
+// Every id recognized as a built-in preset (availability aside). Used to decide
+// whether a SAVED deployment is a known preset vs a custom override — a saved
+// gpt-realtime-2 should still register as a preset even if the region probe
+// hasn't returned yet, so we don't wrongly flip the form into custom mode.
+const ALL_VOICELIVE_PRESET_IDS = new Set(
+  [...VOICELIVE_MODEL_PRESETS, ...REGION_GATED_VOICELIVE_PRESETS].map((p) => p.id),
+);
+
+// Classify a VoiceLive model by its audio architecture. This is the #1 confusion
+// point: within VoiceLive, the chosen model — not a separate toggle — decides whether
+// audio goes straight into the model or runs through a transcription cascade.
+//   • "native"   → speech-to-speech: audio flows directly into the model and back out.
+//                  Any input transcription is an ADVISORY side-channel and does NOT
+//                  drive the model, so it may not match what the model actually heard.
+//   • "cascaded" → Azure STT → text LLM → Azure TTS. The transcription model's output
+//                  IS the authoritative text the LLM reasons over (full granular control).
+const classifyVoiceLiveArch = (deploymentId) => {
+  const name = (deploymentId || '').toLowerCase();
+  if (!name) return 'native';
+  // Realtime / native-audio families: gpt-realtime*, phi4-mm-realtime, azure-realtime
+  if (name.includes('realtime')) return 'native';
+  // Everything else (gpt-4o, gpt-4.1, gpt-5 family, phi4-mini) runs cascaded STT→LLM→TTS
+  return 'cascaded';
+};
+
 const detectEndpointPreference = (deploymentId) => {
   const name = (deploymentId || '').toLowerCase();
   if (!name) {
@@ -311,6 +359,7 @@ const TEMPLATE_VARIABLES = [
 
 const TRANSCRIPTION_MODELS = [
   { value: 'azure-speech', label: 'Azure Speech' },
+  { value: 'mai-transcribe-1.5', label: 'MAI-Transcribe 1.5' },
   { value: 'gpt-4o-transcribe', label: 'GPT-4o Transcribe' },
   { value: 'whisper-1', label: 'Whisper-1' },
 ];
@@ -1032,10 +1081,20 @@ export default function AgentBuilderContent({
   onAgentUpdated,
   existingConfig = null,
   editMode = false,
+  // When set, deep-link straight into editing the named agent: the matching
+  // template (session override or base YAML) is loaded and the form opens in
+  // edit mode. Used by the "Edit live agent" quick action.
+  initialEditAgentName = null,
 }) {
   // Tab state
   const [activeTab, setActiveTab] = useState(0);
+  // Inner sub-tab for the Model & Audio panel: 'cascade' | 'voicelive'
+  const [audioSubTab, setAudioSubTab] = useState('cascade');
+  // Interactive "how orchestration works" diagram dialog.
+  const [showOrchestrationDiagram, setShowOrchestrationDiagram] = useState(false);
   const [isEditMode, setIsEditMode] = useState(editMode);
+  // Guard so the live-agent deep-link only auto-applies once per open.
+  const liveEditAppliedRef = useRef(false);
   
   // Loading states
   const [loading, setLoading] = useState(false);
@@ -1047,6 +1106,15 @@ export default function AgentBuilderContent({
   const [availableTools, setAvailableTools] = useState([]);
   const [availableVoices, setAvailableVoices] = useState([]);
   const [availableTemplates, setAvailableTemplates] = useState([]);
+  // Set of lowercased deployment_ids actually deployed in the connected Azure
+  // region (from /models). null = not yet loaded. Used to region-gate the
+  // next-gen realtime VoiceLive presets.
+  const [deployedModelIds, setDeployedModelIds] = useState(null);
+  // Live model deployments derived into per-mode option lists ({cascade,
+  // voicelive}). null = not loaded / query failed → fall back to static presets.
+  const [liveModelOptions, setLiveModelOptions] = useState(null);
+  // Region-verification metadata for the TTS voice list (from /voices).
+  const [voicesRegionVerified, setVoicesRegionVerified] = useState(null);
   const [detailAgent, setDetailAgent] = useState(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [selectedTool, setSelectedTool] = useState(null);
@@ -1108,6 +1176,11 @@ export default function AgentBuilderContent({
       reasoning_effort: null,
       include_reasoning: false,
     },
+    // Voice Live BYOM (Bring Your Own Model) — opt-in, VoiceLive mode only.
+    // Empty mode = disabled (managed VoiceLive).
+    byom: {
+      mode: '',
+    },
     voice: {
       name: 'en-US-AvaMultilingualNeural',
       type: 'azure-standard',
@@ -1158,35 +1231,89 @@ export default function AgentBuilderContent({
     () => resolveEndpointPreference(config.voicelive_model),
     [config.voicelive_model],
   );
+  // Cascade model dropdown options: prefer the LIVE deployments from the
+  // connected Foundry resource; fall back to the static presets when the query
+  // failed or returned nothing.
+  const cascadeModelPresets = useMemo(() => {
+    const live = liveModelOptions?.cascade;
+    return live && live.length ? live : CASCADE_MODEL_PRESETS;
+  }, [liveModelOptions]);
+
+  // VoiceLive model dropdown options — BYOM-aware:
+  //   • BYOM OFF (managed VoiceLive): the curated managed VoiceLive models
+  //     (pricing tiers). Managed VoiceLive runs VoiceLive-hosted models, NOT
+  //     your resource deployments.
+  //   • BYOM ON: your LIVE deployments from the connected Foundry resource.
+  // A saved value not in the list is appended so a selection is never lost.
+  const voiceLiveModelPresets = useMemo(() => {
+    const savedId = (config.voicelive_model?.deployment_id || '').trim();
+    const byomOn = Boolean(config.byom?.mode);
+    if (byomOn) {
+      const live = liveModelOptions?.voicelive;
+      const base = live && live.length ? live : MANAGED_VOICELIVE_OPTIONS;
+      if (savedId && !base.some((o) => o.id === savedId)) {
+        return [...base, { id: savedId, label: savedId }];
+      }
+      return base;
+    }
+    // Managed VoiceLive → curated managed model list (by tier).
+    if (savedId && !MANAGED_VOICELIVE_OPTIONS.some((o) => o.id === savedId)) {
+      return [...MANAGED_VOICELIVE_OPTIONS, { id: savedId, label: savedId }];
+    }
+    return MANAGED_VOICELIVE_OPTIONS;
+  }, [liveModelOptions, config.byom?.mode, config.voicelive_model?.deployment_id]);
+
+  // Known (selectable) ids per mode = the rendered option list ∪ the static
+  // presets. Used to decide whether a SAVED deployment is a known option vs a
+  // free-text custom override.
+  const cascadeKnownIds = useMemo(
+    () =>
+      new Set([
+        ...cascadeModelPresets.map((o) => o.id),
+        ...CASCADE_MODEL_PRESETS.map((o) => o.id),
+      ]),
+    [cascadeModelPresets],
+  );
+  const voiceliveKnownIds = useMemo(
+    () =>
+      new Set([...voiceLiveModelPresets.map((o) => o.id), ...ALL_VOICELIVE_PRESET_IDS]),
+    [voiceLiveModelPresets],
+  );
+
   // Compute preset values for dropdown display
   const cascadeModelPreset = useMemo(() => {
     if (isCascadeCustomMode) return 'custom';
     const deploymentId = (config.cascade_model?.deployment_id || '').trim();
-    return CASCADE_MODEL_PRESETS.some((preset) => preset.id === deploymentId)
-      ? deploymentId
-      : 'custom';
-  }, [config.cascade_model?.deployment_id, isCascadeCustomMode]);
+    return cascadeKnownIds.has(deploymentId) ? deploymentId : 'custom';
+  }, [config.cascade_model?.deployment_id, isCascadeCustomMode, cascadeKnownIds]);
   const voiceliveModelPreset = useMemo(() => {
     if (isVoiceliveCustomMode) return 'custom';
     const deploymentId = (config.voicelive_model?.deployment_id || '').trim();
-    return VOICELIVE_MODEL_PRESETS.some((preset) => preset.id === deploymentId)
-      ? deploymentId
-      : 'custom';
-  }, [config.voicelive_model?.deployment_id, isVoiceliveCustomMode]);
+    return voiceliveKnownIds.has(deploymentId) ? deploymentId : 'custom';
+  }, [config.voicelive_model?.deployment_id, isVoiceliveCustomMode, voiceliveKnownIds]);
   const isCascadeCustom = isCascadeCustomMode || cascadeModelPreset === 'custom';
   const isVoiceliveCustom = isVoiceliveCustomMode || voiceliveModelPreset === 'custom';
 
-  // Initialize custom mode flags based on loaded config (only once)
+  // Initialize custom mode flags based on loaded config (only once, after the
+  // live model query resolves so a live-only deployment id isn't misread as
+  // custom). deployedModelIds flips from null→Set on success OR failure.
   useEffect(() => {
     if (customModeInitialized.current) return;
+    if (deployedModelIds === null) return;
     const cascadeId = (config.cascade_model?.deployment_id || '').trim();
     const voiceliveId = (config.voicelive_model?.deployment_id || '').trim();
-    const cascadeIsCustom = cascadeId && !CASCADE_MODEL_PRESETS.some(p => p.id === cascadeId);
-    const voiceliveIsCustom = voiceliveId && !VOICELIVE_MODEL_PRESETS.some(p => p.id === voiceliveId);
+    const cascadeIsCustom = cascadeId && !cascadeKnownIds.has(cascadeId);
+    const voiceliveIsCustom = voiceliveId && !voiceliveKnownIds.has(voiceliveId);
     if (cascadeIsCustom) setIsCascadeCustomMode(true);
     if (voiceliveIsCustom) setIsVoiceliveCustomMode(true);
     customModeInitialized.current = true;
-  }, [config.cascade_model?.deployment_id, config.voicelive_model?.deployment_id]);
+  }, [
+    deployedModelIds,
+    cascadeKnownIds,
+    voiceliveKnownIds,
+    config.cascade_model?.deployment_id,
+    config.voicelive_model?.deployment_id,
+  ]);
   const cascadeOverrideValue = (config.cascade_model?.deployment_id || '').trim();
   const voiceliveOverrideValue = (config.voicelive_model?.deployment_id || '').trim();
   const isCascadeOverrideMissing = isCascadeCustom && !cascadeOverrideValue;
@@ -1226,15 +1353,41 @@ export default function AgentBuilderContent({
       if (response.ok) {
         const data = await response.json();
         setAvailableVoices(data.voices || []);
+        // Surface whether the catalog was cross-checked against the live region
+        // (vs the static fallback when Azure couldn't be reached).
+        setVoicesRegionVerified({
+          verified: Boolean(data.verified_against_region),
+          source: data.source || 'static-catalog',
+        });
       }
     } catch (err) {
       logger.error('Failed to fetch voices:', err);
     }
   }, []);
 
+  const fetchAvailableModels = useCallback(async () => {
+    const live = await fetchFoundryModels();
+    if (!live) {
+      // Query failed or returned nothing — keep static presets as the fallback.
+      setDeployedModelIds(new Set());
+      setLiveModelOptions(null);
+      return;
+    }
+    const ids = new Set(
+      live.models
+        .map((m) => (m.deployment_id || '').toLowerCase())
+        .filter(Boolean),
+    );
+    setDeployedModelIds(ids);
+    setLiveModelOptions(deriveModelOptions(live.models));
+  }, []);
+
   const fetchAvailableTemplates = useCallback(async () => {
     try {
-      const response = await fetch(`${API_BASE_URL}/api/v1/agent-builder/templates`);
+      const url = sessionId
+        ? `${API_BASE_URL}/api/v1/agent-builder/templates?session_id=${encodeURIComponent(sessionId)}`
+        : `${API_BASE_URL}/api/v1/agent-builder/templates`;
+      const response = await fetch(url);
       if (response.ok) {
         const data = await response.json();
         setAvailableTemplates(data.templates || []);
@@ -1242,7 +1395,7 @@ export default function AgentBuilderContent({
     } catch (err) {
       logger.error('Failed to fetch templates:', err);
     }
-  }, []);
+  }, [sessionId]);
 
   const fetchExistingConfig = useCallback(async () => {
     if (!sessionId || !editMode) return;
@@ -1253,28 +1406,47 @@ export default function AgentBuilderContent({
       if (response.ok) {
         const data = await response.json();
         if (data.config) {
-          setConfig((prev) => ({
-            ...prev,
-            name: data.config.name || prev.name,
-            description: data.config.description || '',
-            greeting: data.config.greeting || '',
-            return_greeting: data.config.return_greeting || '',
-            handoff_trigger: data.config.handoff_trigger || '',
-            prompt: data.config.prompt_full || data.config.prompt || prev.prompt,
-            tools: data.config.tools || [],
-            cascade_model: data.config.cascade_model || prev.cascade_model,
-            voicelive_model: data.config.voicelive_model || prev.voicelive_model,
-            voice: data.config.voice || prev.voice,
-            speech: data.config.speech || prev.speech,
-            session: {
-              ...prev.session,
-              ...(data.config.session || {}),
-              input_audio_transcription_settings: {
-                ...(prev.session?.input_audio_transcription_settings || {}),
-                ...(data.config.session?.input_audio_transcription_settings || {}),
+          setConfig((prev) => {
+            // The backend persists `session.turn_detection` as a NESTED object,
+            // but the UI binds to FLAT fields (turn_detection_type,
+            // turn_detection_threshold, silence_duration_ms, prefix_padding_ms).
+            // Flatten on read so saved VAD/turn settings survive a reopen.
+            const incomingSession = data.config.session || {};
+            const td = incomingSession.turn_detection || {};
+            return {
+              ...prev,
+              name: data.config.name || prev.name,
+              description: data.config.description || '',
+              greeting: data.config.greeting || '',
+              return_greeting: data.config.return_greeting || '',
+              handoff_trigger: data.config.handoff_trigger || '',
+              prompt: data.config.prompt_full || data.config.prompt || prev.prompt,
+              tools: data.config.tools || [],
+              cascade_model: data.config.cascade_model || prev.cascade_model,
+              voicelive_model: data.config.voicelive_model || prev.voicelive_model,
+              byom: {
+                mode: data.config.byom?.mode || '',
               },
-            },
-          }));
+              voice: data.config.voice || prev.voice,
+              speech: data.config.speech || prev.speech,
+              session: {
+                ...prev.session,
+                ...incomingSession,
+                turn_detection_type:
+                  td.type ?? incomingSession.turn_detection_type ?? prev.session?.turn_detection_type,
+                turn_detection_threshold:
+                  td.threshold ?? incomingSession.turn_detection_threshold ?? prev.session?.turn_detection_threshold,
+                silence_duration_ms:
+                  td.silence_duration_ms ?? incomingSession.silence_duration_ms ?? prev.session?.silence_duration_ms,
+                prefix_padding_ms:
+                  td.prefix_padding_ms ?? incomingSession.prefix_padding_ms ?? prev.session?.prefix_padding_ms,
+                input_audio_transcription_settings: {
+                  ...(prev.session?.input_audio_transcription_settings || {}),
+                  ...(incomingSession.input_audio_transcription_settings || {}),
+                },
+              },
+            };
+          });
           setIsEditMode(true);
         }
       }
@@ -1488,15 +1660,22 @@ export default function AgentBuilderContent({
   }, [oauthPending, fetchMcpServers, handleTestMcpConnection]);
 
   useEffect(() => {
-    setLoading(true);
-    Promise.all([
-      fetchAvailableTools(),
-      fetchAvailableVoices(),
-      fetchAvailableTemplates(),
-      fetchExistingConfig(),
-      fetchMcpServers(),
-    ]).finally(() => setLoading(false));
-  }, [fetchAvailableTools, fetchAvailableVoices, fetchAvailableTemplates, fetchExistingConfig, fetchMcpServers]);
+    // Fire the non-essential reference fetches without gating the UI on them.
+    // Tools/voices/templates/MCP populate dropdowns that aren't needed to render
+    // the form, so the dialog can paint immediately instead of waiting on all 5.
+    fetchAvailableTools();
+    fetchAvailableVoices();
+    fetchAvailableModels();
+    fetchAvailableTemplates();
+    fetchMcpServers();
+    // Only block with the spinner while loading an existing agent's config in
+    // edit mode (that data IS needed before the form is meaningful). In create
+    // mode fetchExistingConfig no-ops, so we never gate.
+    if (editMode) {
+      setLoading(true);
+      fetchExistingConfig().finally(() => setLoading(false));
+    }
+  }, [editMode, fetchAvailableTools, fetchAvailableVoices, fetchAvailableModels, fetchAvailableTemplates, fetchExistingConfig, fetchMcpServers]);
 
   // Apply existing config
   useEffect(() => {
@@ -1670,11 +1849,35 @@ export default function AgentBuilderContent({
       tools: template.tools || [],
       cascade_model: template.cascade_model || prev.cascade_model,
       voicelive_model: template.voicelive_model || prev.voicelive_model,
+      byom: {
+        mode: template.byom?.mode || '',
+      },
       voice: template.voice || prev.voice,
     }));
     setSuccess(`Applied agent: ${template.name}`);
     setTimeout(() => setSuccess(null), 3000);
   }, []);
+
+  // Deep-link: when asked to edit a specific live agent, wait for the template
+  // cache to load, find the matching agent (session override replaces base YAML
+  // in this list), populate the form, and open it in edit mode on the model tab.
+  useEffect(() => {
+    if (!initialEditAgentName) {
+      liveEditAppliedRef.current = false;
+      return;
+    }
+    if (liveEditAppliedRef.current) return;
+    if (!Array.isArray(availableTemplates) || availableTemplates.length === 0) return;
+    const target = String(initialEditAgentName).toLowerCase().trim();
+    const match = availableTemplates.find(
+      (t) => String(t.name || '').toLowerCase().trim() === target
+    );
+    if (!match) return;
+    liveEditAppliedRef.current = true;
+    applyTemplateFromCache(match);
+    setIsEditMode(true);
+    setActiveTab(3); // jump straight to Model & Audio
+  }, [initialEditAgentName, availableTemplates, applyTemplateFromCache]);
 
   const handleApplyTemplate = useCallback(async (templateId) => {
     setLoading(true);
@@ -1789,6 +1992,12 @@ export default function AgentBuilderContent({
           ...config.voicelive_model,
           endpoint_preference: voiceliveEndpointPreference,
         },
+        // BYOM is opt-in: only send a profile when a mode is selected.
+        byom: config.byom?.mode
+          ? {
+              mode: config.byom.mode,
+            }
+          : null,
         voice: config.voice,
         speech: config.speech,
         session: config.session,
@@ -1805,13 +2014,12 @@ export default function AgentBuilderContent({
         handleConfigChange('prompt', draftPrompt);
       }
 
-      const url = isEditMode
-        ? `${API_BASE_URL}/api/v1/agent-builder/session/${encodeURIComponent(sessionId)}`
-        : `${API_BASE_URL}/api/v1/agent-builder/create?session_id=${encodeURIComponent(sessionId)}`;
-      const method = isEditMode ? 'PUT' : 'POST';
+      // PUT /session is an idempotent upsert (create + update share one backend
+      // path), so always use it. isEditMode only affects copy and callbacks.
+      const url = `${API_BASE_URL}/api/v1/agent-builder/session/${encodeURIComponent(sessionId)}`;
 
       const res = await fetch(url, {
-        method,
+        method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
       });
@@ -1827,6 +2035,10 @@ export default function AgentBuilderContent({
       if (!isEditMode) {
         setIsEditMode(true);
       }
+
+      // Refresh the agent card list so the saved override (model/voice) is reflected
+      // immediately instead of showing the stale base YAML values.
+      fetchAvailableTemplates();
 
       const agentConfig = { ...config, session_id: sessionId, agent_id: data.agent_id };
 
@@ -2231,9 +2443,7 @@ export default function AgentBuilderContent({
         <Tab icon={<SmartToyIcon />} label="Identity" iconPosition="start" />
         <Tab icon={<CodeIcon />} label="Prompt" iconPosition="start" />
         <Tab icon={<BuildIcon />} label="Tools" iconPosition="start" />
-        <Tab icon={<RecordVoiceOverIcon />} label="Voice" iconPosition="start" />
-        <Tab icon={<TuneIcon />} label="Model" iconPosition="start" />
-        <Tab icon={<HearingIcon />} label="VAD/Session" iconPosition="start" />
+        <Tab icon={<TuneIcon />} label="Model & Audio" iconPosition="start" />
       </Tabs>
 
       {/* Content */}
@@ -2695,12 +2905,192 @@ export default function AgentBuilderContent({
             </TabPanel>
 
             {/* TAB 3: VOICE */}
+            {/* TAB 3: MODEL & AUDIO — consolidated Voice (TTS) + Model + VAD/Session */}
             <TabPanel value={activeTab} index={3}>
-              <Card variant="outlined" sx={styles.sectionCard}>
-                <CardContent>
-                  <Typography variant="subtitle2" color="primary" sx={{ mb: 2, fontWeight: 600 }}>
-                    🎙️ Voice Settings
+              <Stack spacing={2}>
+                <Alert severity="info" icon={<WarningAmberIcon />} sx={{ borderRadius: '12px' }}>
+                  <AlertTitle sx={{ fontWeight: 600 }}>Foundry Deployment Required</AlertTitle>
+                  <Typography variant="body2">
+                    Model names must match deployments in your connected Foundry/Azure OpenAI resource.
                   </Typography>
+                </Alert>
+
+                {/* Prominent orchestration-mode selector (top of section) */}
+                <Box>
+                  <Stack direction="row" alignItems="center" justifyContent="space-between" sx={{ mb: 0.25 }}>
+                    <Typography variant="overline" sx={{ fontWeight: 700, color: 'text.secondary', letterSpacing: 1 }}>
+                      Orchestration Mode
+                    </Typography>
+                    <Button
+                      size="small"
+                      variant="outlined"
+                      startIcon={<InfoOutlinedIcon sx={{ fontSize: 16 }} />}
+                      onClick={() => setShowOrchestrationDiagram(true)}
+                      sx={{
+                        textTransform: 'none',
+                        fontSize: 12,
+                        fontWeight: 700,
+                        borderRadius: 2,
+                        borderColor: 'secondary.main',
+                        color: 'secondary.main',
+                        '&:hover': { borderColor: 'secondary.dark', bgcolor: 'secondary.50' },
+                      }}
+                    >
+                      See how it works →
+                    </Button>
+                  </Stack>
+                  <ToggleButtonGroup
+                    value={audioSubTab}
+                    exclusive
+                    onChange={(_e, v) => v && setAudioSubTab(v)}
+                    fullWidth
+                    sx={{
+                      mt: 0.5,
+                      gap: 1.5,
+                      '& .MuiToggleButtonGroup-grouped': {
+                        border: '2px solid',
+                        borderColor: 'divider',
+                        borderRadius: '12px !important',
+                        textTransform: 'none',
+                        px: 2,
+                        py: 1.5,
+                        alignItems: 'flex-start',
+                      },
+                    }}
+                  >
+                    <ToggleButton
+                      value="cascade"
+                      sx={{
+                        '&.Mui-selected': {
+                          borderColor: 'primary.main',
+                          backgroundColor: 'primary.50',
+                          boxShadow: '0 0 0 1px var(--mui-palette-primary-main, #1976d2) inset',
+                          '&:hover': { backgroundColor: 'primary.100' },
+                        },
+                      }}
+                    >
+                      <Stack direction="row" spacing={1.5} alignItems="center" sx={{ width: '100%' }}>
+                        <MemoryIcon color={audioSubTab === 'cascade' ? 'primary' : 'disabled'} />
+                        <Box sx={{ textAlign: 'left', flex: 1 }}>
+                          <Stack direction="row" alignItems="center" spacing={1}>
+                            <Typography variant="subtitle2" fontWeight={700} color={audioSubTab === 'cascade' ? 'primary.main' : 'text.primary'}>
+                              Custom Speech Cascade
+                            </Typography>
+                            <Tooltip
+                              arrow
+                              placement="top"
+                              title={
+                                <Box sx={{ p: 0.5, maxWidth: 260 }}>
+                                  <Typography variant="caption" fontWeight={700} display="block" gutterBottom>
+                                    🌐 Direct Azure Speech Services
+                                  </Typography>
+                                  <Typography variant="caption" display="block">
+                                    You orchestrate Azure Speech STT, the LLM, and Azure Speech TTS as
+                                    separate components yourself. More moving parts, but fine-grained
+                                    control over each model, voice persona, prompt routing, and adaptive
+                                    policies.
+                                  </Typography>
+                                  <Typography variant="caption" display="block" sx={{ mt: 0.75, fontStyle: 'italic', opacity: 0.85 }}>
+                                    Both modes work — Custom Speech gives you a bit more control over every stage.
+                                  </Typography>
+                                </Box>
+                              }
+                            >
+                              <InfoOutlinedIcon
+                                sx={{ fontSize: 15, color: 'text.disabled', cursor: 'help' }}
+                                onClick={(e) => e.stopPropagation()}
+                              />
+                            </Tooltip>
+                            {audioSubTab === 'cascade' && <CheckIcon fontSize="small" color="primary" />}
+                          </Stack>
+                          <Typography variant="caption" color="text.secondary">
+                            STT → LLM → TTS · full per-component control
+                          </Typography>
+                        </Box>
+                      </Stack>
+                    </ToggleButton>
+                    <ToggleButton
+                      value="voicelive"
+                      sx={{
+                        '&.Mui-selected': {
+                          borderColor: 'secondary.main',
+                          backgroundColor: 'secondary.50',
+                          boxShadow: '0 0 0 1px var(--mui-palette-secondary-main, #9c27b0) inset',
+                          '&:hover': { backgroundColor: 'secondary.100' },
+                        },
+                      }}
+                    >
+                      <Stack direction="row" spacing={1.5} alignItems="center" sx={{ width: '100%' }}>
+                        <HearingIcon color={audioSubTab === 'voicelive' ? 'secondary' : 'disabled'} />
+                        <Box sx={{ textAlign: 'left', flex: 1 }}>
+                          <Stack direction="row" alignItems="center" spacing={1}>
+                            <Typography variant="subtitle2" fontWeight={700} color={audioSubTab === 'voicelive' ? 'secondary.main' : 'text.primary'}>
+                              VoiceLive
+                            </Typography>
+                            <Tooltip
+                              arrow
+                              placement="top"
+                              title={
+                                <Box sx={{ p: 0.5, maxWidth: 260 }}>
+                                  <Typography variant="caption" fontWeight={700} display="block" gutterBottom>
+                                    ⚡️ Managed speech channel
+                                  </Typography>
+                                  <Typography variant="caption" display="block">
+                                    Azure AI Voice Live hosts the entire STT → LLM → TTS loop as one
+                                    managed realtime service. Speech-in and speech-out are handled for
+                                    you — lowest latency (~200-400ms), native barge-in, and minimal
+                                    orchestration code.
+                                  </Typography>
+                                  <Typography variant="caption" display="block" sx={{ mt: 0.75, fontStyle: 'italic', opacity: 0.85 }}>
+                                    Both modes work — VoiceLive trades fine-grained control for simplicity and speed.
+                                  </Typography>
+                                </Box>
+                              }
+                            >
+                              <InfoOutlinedIcon
+                                sx={{ fontSize: 15, color: 'text.disabled', cursor: 'help' }}
+                                onClick={(e) => e.stopPropagation()}
+                              />
+                            </Tooltip>
+                            {audioSubTab === 'voicelive' && <CheckIcon fontSize="small" color="secondary" />}
+                          </Stack>
+                          <Typography variant="caption" color="text.secondary">
+                            Realtime managed audio · lowest latency
+                          </Typography>
+                        </Box>
+                      </Stack>
+                    </ToggleButton>
+                  </ToggleButtonGroup>
+                </Box>
+
+                {/* Interactive "how orchestration works" diagram — same modal as Quick Tune */}
+                <OrchestrationDiagramModal
+                  open={showOrchestrationDiagram}
+                  onClose={() => setShowOrchestrationDiagram(false)}
+                  initialMode={audioSubTab}
+                />
+
+                {/* Shared Voice (TTS) — applies to BOTH Cascade and VoiceLive */}
+                <Card variant="outlined" sx={styles.sectionCard}>
+                  <CardContent>
+                    <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 2 }}>
+                      <Typography variant="subtitle2" color="primary" sx={{ fontWeight: 600 }}>
+                        🎙️ Voice (TTS) — shared by Cascade & VoiceLive
+                      </Typography>
+                      {voicesRegionVerified && (
+                        <Chip
+                          size="small"
+                          variant="outlined"
+                          color={voicesRegionVerified.verified ? 'success' : 'default'}
+                          label={
+                            voicesRegionVerified.verified
+                              ? `Region-verified (${availableVoices.length})`
+                              : 'Catalog (region not verified)'
+                          }
+                          sx={{ height: 20, fontSize: '11px' }}
+                        />
+                      )}
+                    </Stack>
                   <Stack spacing={2}>
                     {!isCustomVoice ? (
                       <Autocomplete
@@ -2743,7 +3133,7 @@ export default function AgentBuilderContent({
                       )}
                     </Stack>
                     <Typography variant="caption" color="text.secondary">
-                      Voice settings control TTS output. Input transcription for VoiceLive is configured in VAD/Session.
+                      Voice settings control TTS output. VoiceLive input transcription is configured below in the VoiceLive mode card.
                       {' '}
                       <Box
                         component="a"
@@ -2790,19 +3180,9 @@ export default function AgentBuilderContent({
                   </Stack>
                 </CardContent>
               </Card>
-            </TabPanel>
-
-            {/* TAB 4: MODEL */}
-            <TabPanel value={activeTab} index={4}>
-              <Stack spacing={2}>
-                <Alert severity="info" icon={<WarningAmberIcon />} sx={{ borderRadius: '12px' }}>
-                  <AlertTitle sx={{ fontWeight: 600 }}>Foundry Deployment Required</AlertTitle>
-                  <Typography variant="body2">
-                    Model names must match deployments in your connected Foundry/Azure OpenAI resource.
-                  </Typography>
-                </Alert>
 
                 {/* Cascade Model Configuration */}
+                {audioSubTab === 'cascade' && (
                 <Accordion defaultExpanded>
                   <AccordionSummary expandIcon={<ExpandMoreIcon />}>
                     <Stack direction="row" alignItems="center" spacing={1}>
@@ -2823,7 +3203,7 @@ export default function AgentBuilderContent({
                           if (selected === 'custom') {
                             setIsCascadeCustomMode(true);
                             // Keep existing value if any, otherwise empty
-                            if (!config.cascade_model?.deployment_id || CASCADE_MODEL_PRESETS.some(p => p.id === config.cascade_model?.deployment_id)) {
+                            if (!config.cascade_model?.deployment_id || cascadeKnownIds.has(config.cascade_model?.deployment_id)) {
                               handleNestedConfigChange('cascade_model', 'deployment_id', '');
                             }
                           } else {
@@ -2833,10 +3213,14 @@ export default function AgentBuilderContent({
                         }}
                         fullWidth
                         size="small"
-                        helperText="Select a base model (override below if needed)"
+                        helperText={
+                          liveModelOptions?.cascade?.length
+                            ? 'Live deployments from your connected Foundry resource (override below if needed)'
+                            : 'Select a base model (override below if needed)'
+                        }
                         SelectProps={{ native: true }}
                       >
-                        {CASCADE_MODEL_PRESETS.map((preset) => (
+                        {cascadeModelPresets.map((preset) => (
                           <option key={preset.id} value={preset.id}>
                             {preset.label}
                           </option>
@@ -3110,11 +3494,49 @@ export default function AgentBuilderContent({
                           />
                         </>
                       )}
+                      <Divider />
+
+                      <Typography variant="subtitle2" color="primary" sx={{ fontWeight: 600 }}>
+                        🎙️ Speech Recognition (STT / VAD)
+                      </Typography>
+                      <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
+                        Applies to Cascade mode only.
+                      </Typography>
+                      <TextField
+                        label="VAD Silence Timeout (ms)"
+                        type="number"
+                        value={config.speech?.vad_silence_timeout_ms ?? 800}
+                        onChange={(e) => handleNestedConfigChange('speech', 'vad_silence_timeout_ms', parseInt(e.target.value))}
+                        fullWidth
+                        size="small"
+                        inputProps={{ min: 100, max: 5000, step: 50 }}
+                        helperText="Silence duration before finalizing recognition"
+                      />
+                      <FormControlLabel
+                        control={
+                          <Checkbox
+                            checked={config.speech?.use_semantic_segmentation ?? false}
+                            onChange={(e) => handleNestedConfigChange('speech', 'use_semantic_segmentation', e.target.checked)}
+                          />
+                        }
+                        label="Use Semantic Segmentation"
+                      />
+                      <FormControlLabel
+                        control={
+                          <Checkbox
+                            checked={config.speech?.enable_diarization ?? false}
+                            onChange={(e) => handleNestedConfigChange('speech', 'enable_diarization', e.target.checked)}
+                          />
+                        }
+                        label="Enable Speaker Diarization"
+                      />
                     </Stack>
                   </AccordionDetails>
                 </Accordion>
+                )}
 
                 {/* VoiceLive Model Configuration */}
+                {audioSubTab === 'voicelive' && (
                 <Accordion defaultExpanded>
                   <AccordionSummary expandIcon={<ExpandMoreIcon />}>
                     <Stack direction="row" alignItems="center" spacing={1}>
@@ -3135,7 +3557,7 @@ export default function AgentBuilderContent({
                           if (selected === 'custom') {
                             setIsVoiceliveCustomMode(true);
                             // Keep existing value if any, otherwise empty
-                            if (!config.voicelive_model?.deployment_id || VOICELIVE_MODEL_PRESETS.some(p => p.id === config.voicelive_model?.deployment_id)) {
+                            if (!config.voicelive_model?.deployment_id || voiceliveKnownIds.has(config.voicelive_model?.deployment_id)) {
                               handleNestedConfigChange('voicelive_model', 'deployment_id', '');
                             }
                           } else {
@@ -3145,10 +3567,14 @@ export default function AgentBuilderContent({
                         }}
                         fullWidth
                         size="small"
-                        helperText="Select a base model (override below if needed)"
+                        helperText={
+                          config.byom?.mode
+                            ? 'BYOM: your deployments on the connected Foundry resource'
+                            : 'Managed Voice Live models (by pricing tier). Turn on BYOM to use your own deployments.'
+                        }
                         SelectProps={{ native: true }}
                       >
-                        {VOICELIVE_MODEL_PRESETS.map((preset) => (
+                        {voiceLiveModelPresets.map((preset) => (
                           <option key={preset.id} value={preset.id}>
                             {preset.label}
                           </option>
@@ -3181,6 +3607,65 @@ export default function AgentBuilderContent({
                         />
                       )}
 
+                      {/* Bring Your Own Model (BYOM) — opt-in connect-time profile */}
+                      <Box sx={{ p: 1.5, borderRadius: 2, border: '1px dashed #c7d2fe', backgroundColor: '#f5f7ff' }}>
+                        <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 1 }}>
+                          <MemoryIcon sx={{ fontSize: 16, color: '#4f46e5' }} />
+                          <Typography variant="caption" sx={{ fontWeight: 700, color: '#4338ca' }}>
+                            Bring Your Own Model (BYOM)
+                          </Typography>
+                        </Stack>
+                        <TextField
+                          select
+                          label="BYOM Profile"
+                          value={config.byom?.mode || ''}
+                          onChange={(e) => handleNestedConfigChange('byom', 'mode', e.target.value)}
+                          fullWidth
+                          size="small"
+                          helperText={
+                            config.byom?.mode
+                              ? '✓ BYOM on — pick the deployment from the Model dropdown above (it now lists your current Foundry resource\u2019s deployments).'
+                              : 'Use your own deployment (fine-tuned, Anthropic/Grok, PTU, model-router). Turning this on switches the Model dropdown above to your Foundry deployments.'
+                          }
+                          InputLabelProps={{ shrink: true }}
+                          SelectProps={{ native: true }}
+                        >
+                          {BYOM_MODES.map((m) => (
+                            <option key={m.id || 'off'} value={m.id}>
+                              {m.label}
+                            </option>
+                          ))}
+                        </TextField>
+                      </Box>
+
+                      {(() => {
+                        const arch = classifyVoiceLiveArch(config.voicelive_model?.deployment_id);
+                        if (arch === 'cascaded') {
+                          return (
+                            <Alert severity="info" icon={<RecordVoiceOverIcon fontSize="small" />} sx={{ borderRadius: 2 }}>
+                              <AlertTitle sx={{ fontWeight: 700 }}>Cascaded pipeline · STT → LLM → TTS</AlertTitle>
+                              <Typography variant="body2">
+                                Azure Speech transcribes the caller, the <strong>text</strong> is sent to this model, and Azure
+                                TTS speaks the reply. The <strong>Transcription Model</strong> (configured below under VoiceLive
+                                Input Transcription) is the <strong>authoritative input</strong> the LLM reasons over — so you get
+                                granular STT control and the transcript faithfully reflects what the model understood.
+                              </Typography>
+                            </Alert>
+                          );
+                        }
+                        return (
+                          <Alert severity="warning" icon={<InfoOutlinedIcon fontSize="small" />} sx={{ borderRadius: 2 }}>
+                            <AlertTitle sx={{ fontWeight: 700 }}>Native speech-to-speech (audio → model → audio)</AlertTitle>
+                            <Typography variant="body2">
+                              Audio streams directly into the model and back out — lowest latency. Any transcription you
+                              configure below is an <strong>advisory side-channel</strong> for logging/UI only; it does{' '}
+                              <strong>not</strong> drive the model and may not exactly match what the model heard. Pick a{' '}
+                              <strong>gpt-4o / gpt-4.1 / gpt-5</strong> family model for transcript-driven (cascaded) control.
+                            </Typography>
+                          </Alert>
+                        );
+                      })()}
+
                       <TextField
                         select
                         label="Endpoint"
@@ -3201,8 +3686,8 @@ export default function AgentBuilderContent({
                       </TextField>
 
                       <Typography variant="caption" color="text.secondary">
-                        VoiceLive models must be deployed to your connected Foundry resource. Foundry agents/BYOM chat
-                        completions are not yet wired in this demo.
+                        VoiceLive models must be deployed to your connected Foundry resource. To use a model you
+                        brought yourself (fine-tuned, Anthropic/Grok, PTU, model-router), enable BYOM above.
                       </Typography>
 
                       <Divider />
@@ -3416,24 +3901,14 @@ export default function AgentBuilderContent({
                           />
                         </>
                       )}
-                    </Stack>
-                  </AccordionDetails>
-                </Accordion>
-              </Stack>
-            </TabPanel>
+                      <Divider />
 
-            {/* TAB 5: VAD/SESSION SETTINGS */}
-            <TabPanel value={activeTab} index={5}>
-              <Stack spacing={3}>
-                {/* VoiceLive Session Settings */}
-                <Card variant="outlined" sx={styles.sectionCard}>
-                  <CardContent>
-                    <Typography variant="subtitle2" color="primary" sx={{ mb: 2, fontWeight: 600 }}>
-                      🎧 VoiceLive Session Settings
-                    </Typography>
-                    <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 2 }}>
-                      These settings apply when using VoiceLive mode (Realtime API).
-                    </Typography>
+                      <Typography variant="subtitle2" color="primary" sx={{ fontWeight: 600 }}>
+                        🎧 Session & Turn Detection
+                      </Typography>
+                      <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
+                        Applies to VoiceLive mode only.
+                      </Typography>
                     <Stack spacing={2}>
                       <TextField
                         select
@@ -3526,9 +4001,20 @@ export default function AgentBuilderContent({
                         <Typography variant="subtitle2" sx={{ fontWeight: 600, mb: 0.5 }}>
                           📝 VoiceLive Input Transcription
                         </Typography>
-                        <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1.5 }}>
-                          Applies to VoiceLive (Realtime). Configure STT model and language for input transcription.
-                        </Typography>
+                        {(() => {
+                          const arch = classifyVoiceLiveArch(config.voicelive_model?.deployment_id);
+                          return (
+                            <Typography
+                              variant="caption"
+                              color={arch === 'native' ? 'warning.main' : 'text.secondary'}
+                              sx={{ display: 'block', mb: 1.5 }}
+                            >
+                              {arch === 'cascaded'
+                                ? 'Authoritative input — with the selected cascaded model (gpt-4o/4.1/5), this STT output IS the text the LLM reasons over.'
+                                : 'Advisory only — the selected native realtime model hears raw audio, so this transcript is for logging/UI and does NOT drive the model.'}
+                            </Typography>
+                          );
+                        })()}
                         <Stack direction="row" spacing={2}>
                           <TextField
                             select
@@ -3561,49 +4047,10 @@ export default function AgentBuilderContent({
                         </Stack>
                       </Box>
                     </Stack>
-                  </CardContent>
-                </Card>
-
-                {/* Cascade Speech Settings */}
-                <Card variant="outlined" sx={styles.sectionCard}>
-                  <CardContent>
-                    <Typography variant="subtitle2" color="primary" sx={{ mb: 2, fontWeight: 600 }}>
-                      🎙️ Cascade Speech Settings
-                    </Typography>
-                    <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 2 }}>
-                      These settings apply when using Cascade mode (STT → LLM → TTS).
-                    </Typography>
-                    <Stack spacing={2}>
-                      <TextField
-                        label="VAD Silence Timeout (ms)"
-                        type="number"
-                        value={config.speech?.vad_silence_timeout_ms ?? 800}
-                        onChange={(e) => handleNestedConfigChange('speech', 'vad_silence_timeout_ms', parseInt(e.target.value))}
-                        fullWidth
-                        inputProps={{ min: 100, max: 5000, step: 50 }}
-                        helperText="Silence duration before finalizing recognition"
-                      />
-                      <FormControlLabel
-                        control={
-                          <Checkbox
-                            checked={config.speech?.use_semantic_segmentation ?? false}
-                            onChange={(e) => handleNestedConfigChange('speech', 'use_semantic_segmentation', e.target.checked)}
-                          />
-                        }
-                        label="Use Semantic Segmentation"
-                      />
-                      <FormControlLabel
-                        control={
-                          <Checkbox
-                            checked={config.speech?.enable_diarization ?? false}
-                            onChange={(e) => handleNestedConfigChange('speech', 'enable_diarization', e.target.checked)}
-                          />
-                        }
-                        label="Enable Speaker Diarization"
-                      />
                     </Stack>
-                  </CardContent>
-                </Card>
+                  </AccordionDetails>
+                </Accordion>
+                )}
               </Stack>
             </TabPanel>
           </>

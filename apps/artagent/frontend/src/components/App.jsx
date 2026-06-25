@@ -12,6 +12,7 @@ import SendRoundedIcon from '@mui/icons-material/SendRounded';
 import BoltRoundedIcon from '@mui/icons-material/BoltRounded';
 import SpeedRoundedIcon from '@mui/icons-material/SpeedRounded';
 import BuildRoundedIcon from '@mui/icons-material/BuildRounded';
+import TuneRoundedIcon from '@mui/icons-material/TuneRounded';
 import TemporaryUserForm from './TemporaryUserForm';
 import { AcsStreamingModeSelector, RealtimeStreamingModeSelector } from './StreamingModeSelector.jsx';
 import ProfileButton from './ProfileButton.jsx';
@@ -49,11 +50,49 @@ import {
   toMs,
 } from '../utils/session.js';
 import logger from '../utils/logger.js';
+import { fetchFoundryModels, deriveModelOptions, MANAGED_VOICELIVE_MODELS } from '../utils/foundryModels.js';
+import { OrchestrationDiagramModal } from './OrchestrationDiagram.jsx';
 
 const STREAM_MODE_STORAGE_KEY = 'artagent.streamingMode';
 const STREAM_MODE_FALLBACK = 'voice_live';
 const REALTIME_STREAM_MODE_STORAGE_KEY = 'artagent.realtimeStreamingMode';
 const REALTIME_STREAM_MODE_FALLBACK = 'realtime';
+
+// Cascade model presets for the Quick Tune popover (fallback when the live
+// deployment list is unavailable). VoiceLive uses MANAGED_VOICELIVE_MODELS
+// (managed) or the live deployments (BYOM) instead.
+const CASCADE_MODEL_PRESETS = [
+  'gpt-4o', 'gpt-4o-mini', 'gpt-4.1', 'gpt-4.1-mini', 'gpt-4',
+  'gpt-5', 'gpt-5-mini', 'gpt-5-nano', 'o3-mini', 'o3', 'o1',
+];
+// Voice Live BYOM (Bring Your Own Model) profile modes (VoiceLive only). Empty =
+// managed VoiceLive (no profile sent). Mirrors the full Agent Builder.
+const BYOM_MODE_OPTIONS = [
+  { value: '', label: 'Off — managed VoiceLive' },
+  { value: 'byom-azure-openai-realtime', label: 'Azure OpenAI Realtime' },
+  { value: 'byom-azure-openai-chat-completion', label: 'Azure OpenAI / Foundry Chat Completion' },
+  { value: 'byom-foundry-anthropic-messages', label: 'Foundry Anthropic Messages (preview)' },
+];
+// Input transcription models for VoiceLive (mirrors the full Agent Builder).
+const TRANSCRIPTION_MODEL_PRESETS = [
+  { value: 'azure-speech', label: 'Azure Speech' },
+  { value: 'mai-transcribe-1.5', label: 'MAI-Transcribe 1.5' },
+  { value: 'gpt-4o-transcribe', label: 'GPT-4o Transcribe' },
+  { value: 'whisper-1', label: 'Whisper-1' },
+];
+// VoiceLive arch: 'realtime' models are native speech-to-speech; everything else
+// runs cascaded STT→LLM→TTS inside VoiceLive.
+const classifyVoiceLiveArch = (id) =>
+  (id || '').toLowerCase().includes('realtime') ? 'native' : 'cascaded';
+
+// Parse a voice rate/pitch string like "-4%" / "+10%" into a signed number.
+const parsePercent = (val) => {
+  if (typeof val === 'number') return val;
+  if (!val) return 0;
+  const m = String(val).match(/-?\d+(\.\d+)?/);
+  return m ? Number(m[0]) : 0;
+};
+const toPercent = (n) => `${n >= 0 ? '+' : ''}${Math.round(n)}%`;
 const PANEL_MARGIN = 16;
 // Avoid noisy logging in hot-path streaming handlers unless explicitly enabled
 const ENABLE_VERBOSE_STREAM_LOGS = false;
@@ -1039,6 +1078,79 @@ showScenarioConfirmation(scenarioName, currentAgentRef.current);
     ]);
   }, [setMessages]);
 
+  // ── Agent update toast (bottom-left) ──────────────────────────────────────
+  // Transient popup summarizing what changed, on which agent, in which scenario,
+  // whenever an agent is created/updated via the builders or Quick Tune.
+  const [agentUpdateToast, setAgentUpdateToast] = useState(null);
+  const agentUpdateToastTimer = useRef(null);
+
+  const formatVoiceShort = useCallback((v) => {
+    if (!v) return '—';
+    return String(v)
+      .replace(/^[a-z]{2}-[A-Z]{2}-/, '')
+      .replace(/MultilingualNeural$/i, '')
+      .replace(/Neural$/i, '');
+  }, []);
+
+  const notifyAgentUpdate = useCallback((agentConfig, action = 'updated') => {
+    if (!agentConfig?.name) return;
+    const name = agentConfig.name;
+    const scenarioName =
+      activeScenarioData?.label
+      || sessionScenarioConfig?.active_scenario
+      || activeScenarioKey
+      || 'No scenario';
+
+    const newModel =
+      agentConfig.cascade_model?.deployment_id || agentConfig.model?.deployment_id || null;
+    const newVoice = agentConfig.voice?.name || null;
+    const hasTools = Array.isArray(agentConfig.tools);
+    const newTools = hasTools ? agentConfig.tools.length : null;
+
+    // Diff against the inventory snapshot captured at the start of this handler
+    // (state updates are async, so this still holds the pre-update values).
+    const prior = agentInventory?.agents?.find((a) => a.name === name) || null;
+    const changes = [];
+    if (prior) {
+      if (prior.model && newModel && prior.model !== newModel) {
+        changes.push(`Model ${prior.model} → ${newModel}`);
+      } else if (!prior.model && newModel) {
+        changes.push(`Model → ${newModel}`);
+      }
+      if ((prior.voice || null) !== (newVoice || null)) {
+        changes.push(`Voice ${formatVoiceShort(prior.voice)} → ${formatVoiceShort(newVoice)}`);
+      }
+      if (hasTools) {
+        const priorTools = prior.toolCount ?? (prior.tools?.length ?? 0);
+        if (priorTools !== newTools) {
+          changes.push(`Tools ${priorTools} → ${newTools}`);
+        }
+      }
+      if ((prior.description || '') !== (agentConfig.description || '')) {
+        changes.push('Description updated');
+      }
+    }
+    if (changes.length === 0) {
+      // No prior snapshot or no detectable diff — show the salient settings.
+      if (newModel) changes.push(`Model ${newModel}`);
+      if (newVoice) changes.push(`Voice ${formatVoiceShort(newVoice)}`);
+      if (hasTools) changes.push(`${newTools} tool${newTools === 1 ? '' : 's'}`);
+    }
+
+    setAgentUpdateToast({ name, scenarioName, changes, action, ts: Date.now() });
+    if (agentUpdateToastTimer.current) clearTimeout(agentUpdateToastTimer.current);
+    agentUpdateToastTimer.current = setTimeout(() => setAgentUpdateToast(null), 8000);
+  }, [activeScenarioData, sessionScenarioConfig, activeScenarioKey, agentInventory, formatVoiceShort]);
+
+  const dismissAgentUpdateToast = useCallback(() => {
+    if (agentUpdateToastTimer.current) clearTimeout(agentUpdateToastTimer.current);
+    setAgentUpdateToast(null);
+  }, []);
+
+  useEffect(() => () => {
+    if (agentUpdateToastTimer.current) clearTimeout(agentUpdateToastTimer.current);
+  }, []);
+
   const validateSessionId = useCallback(
     async (id) => {
       if (!id) return false;
@@ -1117,6 +1229,50 @@ showScenarioConfirmation(scenarioName, currentAgentRef.current);
   const closeDemoForm = useCallback(() => setShowDemoForm(false), [setShowDemoForm]);
   const [showAgentBuilder, setShowAgentBuilder] = useState(false);
   const [showAgentScenarioBuilder, setShowAgentScenarioBuilder] = useState(false);
+  // When set, the builder deep-links into editing this live/session agent.
+  const [liveEditAgentName, setLiveEditAgentName] = useState(null);
+  // Live session-settings ("Quick Tune") popover — explore/edit/prototype model,
+  // voice, and VAD without opening the full builder. Persists via PUT /session
+  // and reconnects (or instant VoiceLive VAD/voice push when nothing structural changed).
+  const [showLiveSettings, setShowLiveSettings] = useState(false);
+  const [liveSettings, setLiveSettings] = useState({
+    // VoiceLive turn detection
+    silence_duration_ms: 700,
+    prefix_padding_ms: 240,
+    turn_detection_threshold: 0.5,
+    // Cascade STT
+    vad_silence_timeout_ms: 800,
+    use_semantic_segmentation: false,
+    // Shared voice (TTS)
+    voice_name: '',
+    voice_style: 'chat',
+    rate: 0, // percent, -50..50
+    pitch: 0, // percent, -50..50
+    // Models (per mode)
+    cascade_model: '',
+    voicelive_model: '',
+    // VoiceLive input transcription (STT) model
+    transcription_model: '',
+    // Voice Live BYOM (Bring Your Own Model) — VoiceLive only, opt-in
+    byom_mode: '',
+  });
+  const [liveSettingsBusy, setLiveSettingsBusy] = useState(false);
+  const [liveSettingsLoading, setLiveSettingsLoading] = useState(false);
+  const [liveVoices, setLiveVoices] = useState([]);
+  // Which settings surface the popover is showing: 'voicelive' | 'cascade'.
+  // Defaults from the active stream mode but the user can switch freely.
+  const [liveSettingsMode, setLiveSettingsMode] = useState('voicelive');
+  // Which Quick Tune mode toggle is currently hovered (shows an explainer
+  // tooltip contrasting Custom Speech vs VoiceLive). null = none hovered.
+  const [quickTuneTip, setQuickTuneTip] = useState(null);
+  // Whether the interactive "how orchestration works" diagram modal is open.
+  const [showOrchestrationDiagram, setShowOrchestrationDiagram] = useState(false);
+  // Snapshot of the current resolved agent config (base for the PUT merge).
+  const liveBaseConfigRef = useRef(null);
+  // Live model deployments from the connected Foundry resource ({cascade, voicelive}),
+  // used to populate the Quick Tune model dropdown (esp. for BYOM). null = not
+  // loaded / query failed → fall back to the static presets.
+  const [liveModelOptions, setLiveModelOptions] = useState(null);
   const [builderInitialMode, setBuilderInitialMode] = useState('agents');
   // When true, the scenario builder opens in "create new" mode (blank form, POST endpoint).
   // When false, it opens in "edit existing" mode with the active custom scenario pre-filled.
@@ -1894,6 +2050,11 @@ showScenarioConfirmation(scenarioName, currentAgentRef.current);
     }
   }, [recording]);
 
+  // Always-current ref so setTimeout callbacks in applyLiveSettings get the latest
+  // handleMicToggle (avoids stale-closure bug where the 2nd call sees recording=true).
+  const handleMicToggleRef = useRef(handleMicToggle);
+  useEffect(() => { handleMicToggleRef.current = handleMicToggle; }, [handleMicToggle]);
+
   const terminateACSCall = useCallback(async () => {
     if (!callActive && !currentCallId) {
       stopRecognitionRef.current?.();
@@ -1955,6 +2116,250 @@ showScenarioConfirmation(scenarioName, currentAgentRef.current);
     }
     setShowPhoneInput((prev) => !prev);
   }, [isCallDisabled, callActive, setShowPhoneInput, terminateACSCall]);
+
+  // Load the current resolved agent config + voices when the Quick Tune popover
+  // opens, so the controls reflect what's actually running.
+  const loadLiveSettings = useCallback(async () => {
+    const agentName = resolvedAgentName;
+    setLiveSettingsLoading(true);
+    try {
+      const [voicesRes, sessionRes, templatesRes] = await Promise.all([
+        fetch(`${API_BASE_URL}/api/v1/agent-builder/voices`).catch(() => null),
+        fetch(`${API_BASE_URL}/api/v1/agent-builder/session/${encodeURIComponent(sessionId)}`).catch(() => null),
+        fetch(`${API_BASE_URL}/api/v1/agent-builder/templates?session_id=${encodeURIComponent(sessionId)}`).catch(() => null),
+      ]);
+
+      // Live model deployments from the connected Foundry resource (for the model
+      // dropdown — important for BYOM, where the deployment is your own). Never
+      // throws; null on failure → static presets remain the fallback.
+      fetchFoundryModels().then((live) => {
+        setLiveModelOptions(live ? deriveModelOptions(live.models) : null);
+      });
+
+      if (voicesRes && voicesRes.ok) {
+        const vd = await voicesRes.json();
+        setLiveVoices(Array.isArray(vd.voices) ? vd.voices : []);
+      }
+
+      // Prefer the live session-agent config; fall back to the agent's template.
+      let base = null;
+      if (sessionRes && sessionRes.ok) {
+        const sd = await sessionRes.json();
+        base = sd.config || null;
+      }
+      if (!base && templatesRes && templatesRes.ok) {
+        const td = await templatesRes.json();
+        const target = (agentName || '').toLowerCase().trim();
+        base = (td.templates || []).find(
+          (t) => String(t.name || '').toLowerCase().trim() === target
+        ) || null;
+      }
+      liveBaseConfigRef.current = base;
+
+      const session = base?.session || {};
+      const td = session.turn_detection || {};
+      const speech = base?.speech || {};
+      const voice = base?.voice || {};
+      setLiveSettings((s) => ({
+        ...s,
+        silence_duration_ms: td.silence_duration_ms ?? session.silence_duration_ms ?? s.silence_duration_ms,
+        prefix_padding_ms: td.prefix_padding_ms ?? session.prefix_padding_ms ?? s.prefix_padding_ms,
+        turn_detection_threshold: td.threshold ?? session.turn_detection_threshold ?? s.turn_detection_threshold,
+        vad_silence_timeout_ms: speech.vad_silence_timeout_ms ?? s.vad_silence_timeout_ms,
+        use_semantic_segmentation: speech.use_semantic_segmentation ?? s.use_semantic_segmentation,
+        voice_name: voice.name || s.voice_name,
+        voice_style: voice.style || s.voice_style,
+        rate: parsePercent(voice.rate),
+        pitch: parsePercent(voice.pitch),
+        cascade_model: base?.cascade_model?.deployment_id || base?.model?.deployment_id || s.cascade_model,
+        voicelive_model: base?.voicelive_model?.deployment_id || s.voicelive_model,
+        transcription_model: session.input_audio_transcription_settings?.model || s.transcription_model,
+        byom_mode: base?.byom?.mode || '',
+      }));
+    } catch (e) {
+      appendLog(`⚠️ Failed to load current settings: ${e.message}`);
+    } finally {
+      setLiveSettingsLoading(false);
+    }
+  }, [resolvedAgentName, sessionId, appendLog]);
+
+  // Open/refresh the popover.
+  const toggleLiveSettings = useCallback(() => {
+    setShowLiveSettings((prev) => {
+      const next = !prev;
+      if (next) {
+        // Seed the panel's mode from the active stream, but let the user switch.
+        setLiveSettingsMode(selectedStreamingMode === 'voice_live' ? 'voicelive' : 'cascade');
+        loadLiveSettings();
+      }
+      return next;
+    });
+  }, [loadLiveSettings, selectedStreamingMode]);
+
+  // Apply Quick Tune edits. Persists the full merged config via PUT /session
+  // (so it survives a reconnect), then either pushes VAD/voice live (VoiceLive,
+  // no model change) or reconnects the call/stream to apply structural changes.
+  const applyLiveSettings = useCallback(async () => {
+    const isVoiceLive = liveSettingsMode === 'voicelive';
+    const base = liveBaseConfigRef.current || {};
+    const ls = liveSettings;
+    // Instant push only makes sense when the panel's mode matches the ACTIVE
+    // stream (the live VoiceLive connection). Previewing the other mode always
+    // takes effect via persist + reconnect.
+    const modeMatchesActive = (selectedStreamingMode === 'voice_live') === isVoiceLive;
+
+    const baseCascadeModel = base.cascade_model?.deployment_id || base.model?.deployment_id || '';
+    const baseVoiceliveModel = base.voicelive_model?.deployment_id || '';
+    const modelChanged = isVoiceLive
+      ? (ls.voicelive_model && ls.voicelive_model !== baseVoiceliveModel)
+      : (ls.cascade_model && ls.cascade_model !== baseCascadeModel);
+
+    // BYOM is bound at connect() time (a WebSocket query param), so any BYOM
+    // change requires the persist + reconnect path — it can't be pushed live.
+    const baseByomMode = base.byom?.mode || '';
+    const byomChanged = isVoiceLive && (ls.byom_mode || '') !== baseByomMode;
+
+    setLiveSettingsBusy(true);
+    try {
+      // Fast path: VoiceLive active, only VAD/voice tweaks (no model/BYOM change) → instant push.
+      if (isVoiceLive && modeMatchesActive && !modelChanged && !byomChanged) {
+        const res = await fetch(
+          `${API_BASE_URL}/api/v1/agent-builder/session/${encodeURIComponent(sessionId)}/live-settings`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              mode: 'voicelive',
+              turn_detection: {
+                type: 'azure_semantic_vad',
+                threshold: Number(ls.turn_detection_threshold),
+                silence_duration_ms: Math.round(ls.silence_duration_ms),
+                prefix_padding_ms: Math.round(ls.prefix_padding_ms),
+              },
+              voice: { name: ls.voice_name || undefined, rate: toPercent(ls.rate) },
+            }),
+          }
+        );
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+        if (data.live) {
+          appendLog('⚡ Applied instantly (VoiceLive)');
+        } else {
+          appendLog('💾 Saved; will apply on next connect.');
+        }
+        notifyAgentUpdate(
+          { name: resolvedAgentName, voice: { name: ls.voice_name } },
+          'updated',
+        );
+        setShowLiveSettings(false);
+        return;
+      }
+
+      // Full path: persist the merged config (creates/updates the session agent),
+      // then reconnect so the model/STT change takes effect.
+      const prompt =
+        base.prompt_full || base.prompt || base.prompt_preview ||
+        'You are a helpful voice assistant.';
+      const payload = {
+        name: resolvedAgentName,
+        description: base.description || '',
+        greeting: base.greeting || '',
+        return_greeting: base.return_greeting || '',
+        handoff_trigger: base.handoff_trigger || '',
+        prompt,
+        tools: base.tools || [],
+        cascade_model: {
+          ...(base.cascade_model || base.model || {}),
+          deployment_id: ls.cascade_model || baseCascadeModel || 'gpt-4o',
+        },
+        voicelive_model: {
+          ...(base.voicelive_model || {}),
+          deployment_id: ls.voicelive_model || baseVoiceliveModel || 'gpt-realtime',
+        },
+        // BYOM is opt-in: only send a profile when a mode is selected.
+        byom: ls.byom_mode
+          ? {
+              mode: ls.byom_mode,
+            }
+          : null,
+        voice: {
+          ...(base.voice || {}),
+          name: ls.voice_name || base.voice?.name || 'en-US-AvaMultilingualNeural',
+          style: ls.voice_style || base.voice?.style || 'chat',
+          rate: toPercent(ls.rate),
+          pitch: toPercent(ls.pitch),
+        },
+        speech: {
+          ...(base.speech || {}),
+          vad_silence_timeout_ms: Math.round(ls.vad_silence_timeout_ms),
+          use_semantic_segmentation: Boolean(ls.use_semantic_segmentation),
+        },
+        session: {
+          ...(base.session || {}),
+          modalities: base.session?.modalities || ['TEXT', 'AUDIO'],
+          input_audio_format: base.session?.input_audio_format || 'PCM16',
+          output_audio_format: base.session?.output_audio_format || 'PCM16',
+          turn_detection_type: base.session?.turn_detection?.type || base.session?.turn_detection_type || 'azure_semantic_vad',
+          turn_detection_threshold: Number(ls.turn_detection_threshold),
+          silence_duration_ms: Math.round(ls.silence_duration_ms),
+          prefix_padding_ms: Math.round(ls.prefix_padding_ms),
+          tool_choice: base.session?.tool_choice || 'auto',
+          input_audio_transcription_settings: (ls.transcription_model || base.session?.input_audio_transcription_settings)
+            ? {
+                ...(base.session?.input_audio_transcription_settings || {}),
+                model: ls.transcription_model || base.session?.input_audio_transcription_settings?.model,
+              }
+            : null,
+        },
+        template_vars: base.template_vars || null,
+      };
+
+      const res = await fetch(
+        `${API_BASE_URL}/api/v1/agent-builder/session/${encodeURIComponent(sessionId)}`,
+        {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        }
+      );
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || `HTTP ${res.status}`);
+      }
+      appendLog('💾 Settings saved to live agent.');
+      notifyAgentUpdate(payload, 'updated');
+
+      if (callActive) {
+        appendLog('🔄 Restarting call to apply changes…');
+        terminateACSCall();
+        setTimeout(() => handlePhoneButtonClick(), 600);
+      } else if (recording) {
+        appendLog('🔄 Reconnecting stream to apply changes…');
+        handleMicToggle();
+        setTimeout(() => handleMicToggleRef.current(), 600);
+      } else {
+        appendLog('💾 Saved; will apply on next connect.');
+      }
+      setShowLiveSettings(false);
+    } catch (e) {
+      appendLog(`⚠️ Failed to apply settings: ${e.message}`);
+    } finally {
+      setLiveSettingsBusy(false);
+    }
+  }, [
+    liveSettingsMode,
+    selectedStreamingMode,
+    liveSettings,
+    sessionId,
+    resolvedAgentName,
+    callActive,
+    recording,
+    terminateACSCall,
+    handlePhoneButtonClick,
+    handleMicToggle,
+    appendLog,
+    notifyAgentUpdate,
+  ]);
 
   const publishMetricsSummary = useCallback(
     (label, detail) => {
@@ -4564,14 +4969,16 @@ showScenarioConfirmation(scenarioName, currentAgentRef.current);
             )}
           </div>
 
-          {/* Agent Builder Button */}
+          {/* Agent Builder Button — opens pre-loaded with the current active
+              agent (from the session/scenario cache) selected for editing. */}
           <button
             onClick={() => {
               setBuilderInitialMode('agents');
               setBuilderScenarioCreateMode(false);
+              setLiveEditAgentName(resolvedAgentName);
               setShowAgentScenarioBuilder(true);
             }}
-            title="Agent Builder"
+            title={`Agent Builder${resolvedAgentName ? ` · ${resolvedAgentName}` : ''}`}
             style={{
               width: '44px',
               height: '44px',
@@ -4600,6 +5007,682 @@ showScenarioConfirmation(scenarioName, currentAgentRef.current);
           >
             <BuildRoundedIcon fontSize="small" />
           </button>
+
+          {/* Live Session Settings ("shorthand") — quick VAD/voice tweaks that
+              apply to the in-progress call. VoiceLive is instant; Cascade
+              restarts the STT leg. */}
+          <div style={{ position: 'relative' }}>
+            <button
+              onClick={() => toggleLiveSettings()}
+              title="Quick Tune — live audio & model settings"
+              style={{
+                width: '44px',
+                height: '44px',
+                borderRadius: '12px',
+                border: '1px solid rgba(226,232,240,0.6)',
+                background: showLiveSettings
+                  ? 'linear-gradient(135deg, #ede9fe, #ddd6fe)'
+                  : 'linear-gradient(145deg, #ffffff, #fafbfc)',
+                color: '#7c3aed',
+                fontSize: '18px',
+                cursor: 'pointer',
+                transition: 'all 0.25s cubic-bezier(0.4, 0, 0.2, 1)',
+                boxShadow: '0 2px 8px rgba(15,23,42,0.08), inset 0 1px 0 rgba(255,255,255,0.8)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.transform = 'translateY(-2px)';
+                e.currentTarget.style.boxShadow = '0 4px 16px rgba(124,58,237,0.2), inset 0 1px 0 rgba(255,255,255,0.8)';
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.transform = 'translateY(0)';
+                e.currentTarget.style.boxShadow = '0 2px 8px rgba(15,23,42,0.08), inset 0 1px 0 rgba(255,255,255,0.8)';
+              }}
+            >
+              <TuneRoundedIcon fontSize="small" />
+            </button>
+
+            {showLiveSettings && (
+              <div
+                style={{
+                  position: 'fixed',
+                  left: '84px',
+                  top: '50%',
+                  transform: 'translateY(-50%)',
+                  width: '320px',
+                  maxHeight: '88vh',
+                  overflowY: 'auto',
+                  background: '#fff',
+                  borderRadius: '14px',
+                  boxShadow: '0 16px 48px rgba(15,23,42,0.22)',
+                  border: '1px solid rgba(226,232,240,0.8)',
+                  padding: '16px',
+                  zIndex: 1300,
+                }}
+                onClick={(e) => e.stopPropagation()}
+              >
+                {(() => {
+                  const isVoiceLive = liveSettingsMode === 'voicelive';
+                  const set = (k, v) => setLiveSettings((s) => ({ ...s, [k]: v }));
+                  const base = liveBaseConfigRef.current || {};
+                  const baseModel = isVoiceLive
+                    ? (base.voicelive_model?.deployment_id || '')
+                    : (base.cascade_model?.deployment_id || base.model?.deployment_id || '');
+                  const chosenModel = isVoiceLive ? liveSettings.voicelive_model : liveSettings.cascade_model;
+                  const modelChanged = chosenModel && chosenModel !== baseModel;
+                  const baseByomModeHint = base.byom?.mode || '';
+                  const byomChangedHint = isVoiceLive && (liveSettings.byom_mode || '') !== baseByomModeHint;
+                  const modeMatchesActive = (selectedStreamingMode === 'voice_live') === isVoiceLive;
+                  // Instant only when VoiceLive is the active stream and no model/BYOM change.
+                  const willReconnect = !(isVoiceLive && modeMatchesActive) || modelChanged || byomChangedHint;
+                  // Model dropdown source:
+                  //   • Cascade → your live deployments (fallback static presets).
+                  //   • VoiceLive + BYOM ON → your live deployments (your own model).
+                  //   • VoiceLive + BYOM OFF → managed Voice Live models (pricing tiers).
+                  const byomOn = isVoiceLive && Boolean(liveSettings.byom_mode);
+                  const liveModeList = isVoiceLive ? liveModelOptions?.voicelive : liveModelOptions?.cascade;
+                  let modelPresets;
+                  let modelSourceLabel = '';
+                  let usingManaged = false;
+                  if (isVoiceLive && !byomOn) {
+                    modelPresets = MANAGED_VOICELIVE_MODELS.map((m) => m.id);
+                    modelSourceLabel = ' · managed Voice Live';
+                    usingManaged = true;
+                  } else if (liveModeList && liveModeList.length) {
+                    modelPresets = liveModeList.map((o) => o.id);
+                    modelSourceLabel = ' · connected Foundry resource';
+                  } else {
+                    modelPresets = isVoiceLive
+                      ? MANAGED_VOICELIVE_MODELS.map((m) => m.id)
+                      : CASCADE_MODEL_PRESETS;
+                    usingManaged = isVoiceLive;
+                  }
+                  // For the managed Voice Live list, suffix each option with its
+                  // pricing tier (pro/basic/lite) — matches the full Agent Builder.
+                  const managedTierById = Object.fromEntries(
+                    MANAGED_VOICELIVE_MODELS.map((m) => [m.id, m.tier]),
+                  );
+                  const modelLabelFor = (id) =>
+                    usingManaged && managedTierById[id] ? `${id} · ${managedTierById[id]}` : id;
+                  const arch = isVoiceLive ? classifyVoiceLiveArch(chosenModel) : null;
+                  const rowStyle = { marginBottom: '14px' };
+                  const labelStyle = {
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    fontSize: '12px',
+                    fontWeight: 600,
+                    color: '#475569',
+                    marginBottom: '6px',
+                  };
+                  const selectStyle = {
+                    width: '100%',
+                    padding: '8px 10px',
+                    borderRadius: '8px',
+                    border: '1px solid #e2e8f0',
+                    fontSize: '13px',
+                    color: '#1e293b',
+                    background: '#fff',
+                    cursor: 'pointer',
+                  };
+                  const sectionLabel = {
+                    fontSize: '10px',
+                    fontWeight: 700,
+                    textTransform: 'uppercase',
+                    letterSpacing: '0.6px',
+                    color: '#94a3b8',
+                    margin: '4px 0 8px',
+                  };
+                  // Ensure current values appear as options even if not in presets/voice list.
+                  const modelOptions = chosenModel && !modelPresets.includes(chosenModel)
+                    ? [chosenModel, ...modelPresets]
+                    : modelPresets;
+                  const voiceOptions = (() => {
+                    const names = (liveVoices || []).map((v) => v.name);
+                    if (liveSettings.voice_name && !names.includes(liveSettings.voice_name)) {
+                      return [{ name: liveSettings.voice_name, display_name: liveSettings.voice_name }, ...(liveVoices || [])];
+                    }
+                    return liveVoices || [];
+                  })();
+                  const styleOptions = ['chat', 'friendly', 'cheerful', 'empathetic', 'assistant', 'newscast', 'customerservice'];
+                  const styleList = liveSettings.voice_style && !styleOptions.includes(liveSettings.voice_style)
+                    ? [liveSettings.voice_style, ...styleOptions]
+                    : styleOptions;
+                  return (
+                    <>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
+                        <TuneRoundedIcon style={{ fontSize: 18, color: '#7c3aed' }} />
+                        <div style={{ fontSize: '13px', fontWeight: 700, color: '#1e293b' }}>
+                          Quick Tune
+                        </div>
+                        {liveSettingsLoading && (
+                          <span style={{ fontSize: '11px', color: '#94a3b8' }}>loading…</span>
+                        )}
+                      </div>
+                      <div style={{
+                        fontSize: '11px',
+                        color: '#64748b',
+                        marginBottom: '12px',
+                      }}>
+                        {resolvedAgentName || 'Agent'}
+                        {(selectedStreamingMode === 'voice_live') === isVoiceLive
+                          ? ' · active mode'
+                          : ' · previewing other mode'}
+                      </div>
+
+                      {/* MODE SELECTOR — choose which settings surface to edit */}
+                      <div
+                        style={{
+                          display: 'flex',
+                          gap: '4px',
+                          padding: '4px',
+                          background: '#f1f5f9',
+                          borderRadius: '10px',
+                          marginBottom: '16px',
+                        }}
+                      >
+                        {[
+                          {
+                            key: 'cascade',
+                            label: 'Custom Speech',
+                            color: '#0ea5e9',
+                            tip: {
+                              icon: '🌐',
+                              title: 'Direct Azure Speech Services',
+                              body:
+                                'You orchestrate Azure Speech STT, the LLM, and Azure Speech TTS as separate components yourself. More moving parts, but fine-grained control over each model, voice persona, and routing.',
+                              foot: 'Both modes work — Custom Speech gives you a bit more control.',
+                            },
+                          },
+                          {
+                            key: 'voicelive',
+                            label: 'VoiceLive',
+                            color: '#7c3aed',
+                            tip: {
+                              icon: '⚡️',
+                              title: 'Managed speech channel',
+                              body:
+                                'Azure AI Voice Live hosts the entire STT → LLM → TTS loop as one managed realtime service. Lowest latency (~200-400ms), native barge-in, minimal orchestration code.',
+                              foot: 'Both modes work — VoiceLive trades control for simplicity and speed.',
+                            },
+                          },
+                        ].map((opt) => {
+                          const selected = liveSettingsMode === opt.key;
+                          return (
+                            <div key={opt.key} style={{ flex: 1, position: 'relative' }}>
+                              <button
+                                onClick={() => setLiveSettingsMode(opt.key)}
+                                style={{
+                                  width: '100%',
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  justifyContent: 'center',
+                                  gap: '5px',
+                                  padding: '7px 8px',
+                                  borderRadius: '8px',
+                                  border: selected ? `1px solid ${opt.color}` : '1px solid transparent',
+                                  background: selected ? '#fff' : 'transparent',
+                                  color: selected ? opt.color : '#64748b',
+                                  fontSize: '12px',
+                                  fontWeight: selected ? 700 : 600,
+                                  cursor: 'pointer',
+                                  boxShadow: selected ? '0 1px 3px rgba(15,23,42,0.1)' : 'none',
+                                  transition: 'all 0.15s ease',
+                                }}
+                              >
+                                {selected ? '● ' : ''}{opt.label}
+                                <span
+                                  onMouseEnter={(e) => {
+                                    const r = e.currentTarget.getBoundingClientRect();
+                                    setQuickTuneTip({
+                                      key: opt.key,
+                                      tip: opt.tip,
+                                      top: r.bottom + 8,
+                                      left: r.left + r.width / 2,
+                                    });
+                                  }}
+                                  onMouseLeave={() =>
+                                    setQuickTuneTip((cur) => (cur?.key === opt.key ? null : cur))
+                                  }
+                                  onClick={(e) => e.stopPropagation()}
+                                  style={{
+                                    width: '14px',
+                                    height: '14px',
+                                    borderRadius: '999px',
+                                    border: `1px solid ${selected ? opt.color : '#cbd5e1'}`,
+                                    color: selected ? opt.color : '#94a3b8',
+                                    fontSize: '9px',
+                                    fontWeight: 700,
+                                    display: 'inline-flex',
+                                    alignItems: 'center',
+                                    justifyContent: 'center',
+                                    cursor: 'help',
+                                    lineHeight: 1,
+                                  }}
+                                >
+                                  i
+                                </span>
+                              </button>
+                            </div>
+                          );
+                        })}
+                      </div>
+
+                      {/* Mode tooltip — portaled out so the popover's overflow
+                          doesn't clip it. */}
+                      {quickTuneTip && typeof document !== 'undefined' &&
+                        createPortal(
+                          <div
+                            role="tooltip"
+                            style={{
+                              position: 'fixed',
+                              top: quickTuneTip.top,
+                              left: quickTuneTip.left,
+                              transform: 'translateX(-50%)',
+                              zIndex: 2200,
+                              width: '248px',
+                              padding: '10px 12px',
+                              borderRadius: '10px',
+                              background: '#0f172a',
+                              color: '#cbd5e1',
+                              boxShadow: '0 12px 28px rgba(15,23,42,0.35)',
+                              fontSize: '11px',
+                              lineHeight: 1.5,
+                              textAlign: 'left',
+                              pointerEvents: 'none',
+                            }}
+                          >
+                            <div
+                              style={{
+                                fontWeight: 700,
+                                color: '#fff',
+                                marginBottom: '4px',
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: '5px',
+                              }}
+                            >
+                              <span>{quickTuneTip.tip.icon}</span>
+                              {quickTuneTip.tip.title}
+                            </div>
+                            <div>{quickTuneTip.tip.body}</div>
+                            <div
+                              style={{
+                                marginTop: '7px',
+                                paddingTop: '7px',
+                                borderTop: '1px solid rgba(148,163,184,0.25)',
+                                fontStyle: 'italic',
+                                color: '#94a3b8',
+                                fontSize: '10px',
+                              }}
+                            >
+                              {quickTuneTip.tip.foot}
+                            </div>
+                          </div>,
+                          document.body,
+                        )}
+
+                      {/* How-it-works button → opens the interactive diagram */}
+                      <button
+                        type="button"
+                        onClick={() => setShowOrchestrationDiagram(true)}
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '8px',
+                          width: '100%',
+                          margin: '0 0 16px',
+                          padding: '10px 12px',
+                          borderRadius: '10px',
+                          border: '1px solid rgba(124,58,237,0.35)',
+                          background: 'linear-gradient(135deg, #faf5ff, #ede9fe)',
+                          color: '#6d28d9',
+                          fontSize: '12px',
+                          fontWeight: 700,
+                          cursor: 'pointer',
+                          boxShadow: '0 1px 3px rgba(124,58,237,0.12)',
+                          transition: 'all 0.15s ease',
+                        }}
+                        onMouseEnter={(e) => {
+                          e.currentTarget.style.background = 'linear-gradient(135deg, #f3e8ff, #ddd6fe)';
+                          e.currentTarget.style.boxShadow = '0 4px 12px rgba(124,58,237,0.2)';
+                        }}
+                        onMouseLeave={(e) => {
+                          e.currentTarget.style.background = 'linear-gradient(135deg, #faf5ff, #ede9fe)';
+                          e.currentTarget.style.boxShadow = '0 1px 3px rgba(124,58,237,0.12)';
+                        }}
+                      >
+                        <span style={{ fontSize: '15px' }}>🗺️</span>
+                        <span style={{ flex: 1, textAlign: 'left', lineHeight: 1.3 }}>
+                          See how it works
+                          <span style={{ display: 'block', fontSize: '10px', fontWeight: 500, color: '#7c3aed', opacity: 0.85 }}>
+                            STT→LLM→TTS vs realtime · tap to explore
+                          </span>
+                        </span>
+                        <span style={{ fontSize: '14px', fontWeight: 800 }}>→</span>
+                      </button>
+
+                      {/* MODEL */}
+                      <div style={sectionLabel}>
+                        Model{modelSourceLabel}
+                      </div>
+                      <div style={rowStyle}>
+                        <select
+                          style={selectStyle}
+                          value={chosenModel || ''}
+                          onChange={(e) => set(isVoiceLive ? 'voicelive_model' : 'cascade_model', e.target.value)}
+                        >
+                          <option value="" disabled>Select model…</option>
+                          {modelOptions.map((m) => (
+                            <option key={m} value={m}>{modelLabelFor(m)}</option>
+                          ))}
+                        </select>
+                        {isVoiceLive && chosenModel && (
+                          <div style={{ fontSize: '10px', color: '#94a3b8', marginTop: '6px', lineHeight: 1.4 }}>
+                            {arch === 'native'
+                              ? '🎙️ Native speech-to-speech (lowest latency)'
+                              : '🔤 Cascaded STT→LLM→TTS inside VoiceLive'}
+                          </div>
+                        )}
+                        {isVoiceLive && chosenModel && arch === 'native' && (
+                          <div
+                            style={{
+                              marginTop: '8px',
+                              padding: '10px 12px',
+                              borderRadius: '10px',
+                              background: 'linear-gradient(135deg, #fffbeb, #fef3c7)',
+                              border: '1px solid #fcd34d',
+                              boxShadow: '0 2px 8px rgba(217,119,6,0.12)',
+                            }}
+                          >
+                            <div
+                              style={{
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: '6px',
+                                fontSize: '11px',
+                                fontWeight: 800,
+                                color: '#b45309',
+                                textTransform: 'uppercase',
+                                letterSpacing: '0.4px',
+                                marginBottom: '6px',
+                              }}
+                            >
+                              <span style={{ fontSize: '13px' }}>⚠️</span>
+                              Realtime model — read before prod
+                            </div>
+                            <ul
+                              style={{
+                                margin: 0,
+                                paddingLeft: '16px',
+                                fontSize: '11px',
+                                lineHeight: 1.5,
+                                color: '#78350f',
+                              }}
+                            >
+                              <li>
+                                <strong>Cannot be fine-tuned.</strong> Native speech-to-speech
+                                models don&apos;t support customization — you steer behavior with
+                                prompts and tools only.
+                              </li>
+                              <li>
+                                <strong>Pricing can be steep.</strong> Audio-in/audio-out tokens
+                                are billed at a premium versus text LLMs — watch cost at scale.
+                              </li>
+                              <li>
+                                <strong>Going to production?</strong> Stand up a robust eval
+                                framework in{' '}
+                                <a
+                                  href="https://learn.microsoft.com/azure/ai-foundry/concepts/evaluation-approach-gen-ai"
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  style={{ color: '#b45309', fontWeight: 700 }}
+                                >
+                                  Azure AI Foundry
+                                </a>{' '}
+                                to benchmark these against higher-throughput, lower-cost text
+                                LLMs (cascaded STT→LLM→TTS) before committing.
+                              </li>
+                            </ul>
+                          </div>
+                        )}
+                      </div>
+
+                      {/* BYOM (Bring Your Own Model) — VoiceLive only */}
+                      {isVoiceLive && (
+                        <>
+                          <div style={sectionLabel}>BYOM — bring your own model</div>
+                          <div style={rowStyle}>
+                            <select
+                              style={selectStyle}
+                              value={liveSettings.byom_mode || ''}
+                              onChange={(e) => set('byom_mode', e.target.value)}
+                            >
+                              {BYOM_MODE_OPTIONS.map((m) => (
+                                <option key={m.value} value={m.value}>{m.label}</option>
+                              ))}
+                            </select>
+                            <div style={{ fontSize: '10px', color: '#94a3b8', marginTop: '6px', lineHeight: 1.4 }}>
+                              {liveSettings.byom_mode
+                                ? '✓ BYOM on — pick the deployment from the Model dropdown above (now lists your current Foundry resource). Applies on reconnect.'
+                                : 'Off = managed Voice Live model. Select a profile to use your own Foundry deployment (chosen via the Model dropdown above).'}
+                            </div>
+                          </div>
+                        </>
+                      )}
+
+                      {/* INPUT TRANSCRIPTION (VoiceLive STT) */}
+                      {isVoiceLive && (
+                        <>
+                          <div style={sectionLabel}>Input transcription (STT)</div>
+                          <div style={rowStyle}>
+                            <select
+                              style={selectStyle}
+                              value={liveSettings.transcription_model || ''}
+                              onChange={(e) => set('transcription_model', e.target.value)}
+                            >
+                              <option value="">(default)</option>
+                              {TRANSCRIPTION_MODEL_PRESETS.map((m) => (
+                                <option key={m.value} value={m.value}>{m.label}</option>
+                              ))}
+                            </select>
+                            {liveSettings.transcription_model === 'mai-transcribe-1.5' && (
+                              <div style={{ fontSize: '10px', color: '#94a3b8', marginTop: '6px', lineHeight: 1.4 }}>
+                                ⚡ MAI-Transcribe — phrase list & custom speech not supported
+                              </div>
+                            )}
+                          </div>
+                        </>
+                      )}
+
+                      {/* VOICE */}
+                      <div style={sectionLabel}>Voice (TTS)</div>
+                      <div style={rowStyle}>
+                        <select
+                          style={selectStyle}
+                          value={liveSettings.voice_name || ''}
+                          onChange={(e) => set('voice_name', e.target.value)}
+                        >
+                          <option value="">(default)</option>
+                          {voiceOptions.map((v) => (
+                            <option key={v.name} value={v.name}>
+                              {v.display_name || v.name}{v.category ? ` · ${v.category}` : ''}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                      <div style={rowStyle}>
+                        <div style={labelStyle}><span>Style</span></div>
+                        <select
+                          style={selectStyle}
+                          value={liveSettings.voice_style || 'chat'}
+                          onChange={(e) => set('voice_style', e.target.value)}
+                        >
+                          {styleList.map((s) => (
+                            <option key={s} value={s}>{s}</option>
+                          ))}
+                        </select>
+                      </div>
+                      <div style={rowStyle}>
+                        <div style={labelStyle}>
+                          <span>Speaking rate</span>
+                          <span>{liveSettings.rate >= 0 ? '+' : ''}{Math.round(liveSettings.rate)}%</span>
+                        </div>
+                        <input
+                          type="range" min="-50" max="50" step="1"
+                          value={liveSettings.rate}
+                          onChange={(e) => set('rate', Number(e.target.value))}
+                          style={{ width: '100%' }}
+                        />
+                      </div>
+                      <div style={rowStyle}>
+                        <div style={labelStyle}>
+                          <span>Pitch</span>
+                          <span>{liveSettings.pitch >= 0 ? '+' : ''}{Math.round(liveSettings.pitch)}%</span>
+                        </div>
+                        <input
+                          type="range" min="-50" max="50" step="1"
+                          value={liveSettings.pitch}
+                          onChange={(e) => set('pitch', Number(e.target.value))}
+                          style={{ width: '100%' }}
+                        />
+                      </div>
+
+                      {/* TURN DETECTION */}
+                      <div style={sectionLabel}>{isVoiceLive ? 'Turn detection (VAD)' : 'Speech recognition (STT)'}</div>
+                      {isVoiceLive ? (
+                        <>
+                          <div style={rowStyle}>
+                            <div style={labelStyle}>
+                              <span>End-of-turn silence</span>
+                              <span>{Math.round(liveSettings.silence_duration_ms)} ms</span>
+                            </div>
+                            <input
+                              type="range" min="100" max="3000" step="50"
+                              value={liveSettings.silence_duration_ms}
+                              onChange={(e) => set('silence_duration_ms', Number(e.target.value))}
+                              style={{ width: '100%' }}
+                            />
+                          </div>
+                          <div style={rowStyle}>
+                            <div style={labelStyle}>
+                              <span>Prefix padding</span>
+                              <span>{Math.round(liveSettings.prefix_padding_ms)} ms</span>
+                            </div>
+                            <input
+                              type="range" min="0" max="1000" step="20"
+                              value={liveSettings.prefix_padding_ms}
+                              onChange={(e) => set('prefix_padding_ms', Number(e.target.value))}
+                              style={{ width: '100%' }}
+                            />
+                          </div>
+                          <div style={rowStyle}>
+                            <div style={labelStyle}>
+                              <span>VAD threshold</span>
+                              <span>{Number(liveSettings.turn_detection_threshold).toFixed(2)}</span>
+                            </div>
+                            <input
+                              type="range" min="0" max="1" step="0.05"
+                              value={liveSettings.turn_detection_threshold}
+                              onChange={(e) => set('turn_detection_threshold', Number(e.target.value))}
+                              style={{ width: '100%' }}
+                            />
+                          </div>
+                        </>
+                      ) : (
+                        <>
+                          <div style={rowStyle}>
+                            <div style={labelStyle}>
+                              <span>STT silence timeout</span>
+                              <span>{Math.round(liveSettings.vad_silence_timeout_ms)} ms</span>
+                            </div>
+                            <input
+                              type="range" min="100" max="5000" step="50"
+                              value={liveSettings.vad_silence_timeout_ms}
+                              onChange={(e) => set('vad_silence_timeout_ms', Number(e.target.value))}
+                              style={{ width: '100%' }}
+                            />
+                          </div>
+                          <label style={{
+                            ...rowStyle,
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '8px',
+                            fontSize: '12px',
+                            fontWeight: 600,
+                            color: '#475569',
+                            cursor: 'pointer',
+                          }}>
+                            <input
+                              type="checkbox"
+                              checked={liveSettings.use_semantic_segmentation}
+                              onChange={(e) => set('use_semantic_segmentation', e.target.checked)}
+                            />
+                            Semantic segmentation
+                          </label>
+                        </>
+                      )}
+
+                      <div style={{
+                        fontSize: '11px',
+                        color: willReconnect ? '#b45309' : '#15803d',
+                        background: willReconnect ? 'rgba(245,158,11,0.1)' : 'rgba(34,197,94,0.1)',
+                        borderRadius: '8px',
+                        padding: '8px 10px',
+                        marginBottom: '12px',
+                        lineHeight: 1.4,
+                      }}>
+                        {willReconnect
+                          ? (modelChanged
+                              ? '🔄 Model change will briefly reconnect the call (context preserved).'
+                              : '🔄 Cascade applies on a quick stream reconnect (context preserved).')
+                          : '⚡ VAD & voice apply instantly — no reconnect.'}
+                      </div>
+
+                      <div style={{ display: 'flex', gap: '8px' }}>
+                        <button
+                          onClick={() => setShowLiveSettings(false)}
+                          style={{
+                            flex: 1,
+                            padding: '8px',
+                            borderRadius: '8px',
+                            border: '1px solid #e2e8f0',
+                            background: '#fff',
+                            color: '#64748b',
+                            fontSize: '12px',
+                            fontWeight: 600,
+                            cursor: 'pointer',
+                          }}
+                        >
+                          Cancel
+                        </button>
+                        <button
+                          onClick={applyLiveSettings}
+                          disabled={liveSettingsBusy || liveSettingsLoading}
+                          style={{
+                            flex: 1,
+                            padding: '8px',
+                            borderRadius: '8px',
+                            border: 'none',
+                            background: (liveSettingsBusy || liveSettingsLoading)
+                              ? '#cbd5e1'
+                              : 'linear-gradient(135deg, #7c3aed, #6d28d9)',
+                            color: '#fff',
+                            fontSize: '12px',
+                            fontWeight: 700,
+                            cursor: (liveSettingsBusy || liveSettingsLoading) ? 'default' : 'pointer',
+                          }}
+                        >
+                          {liveSettingsBusy ? 'Applying…' : 'Apply'}
+                        </button>
+                      </div>
+                    </>
+                  );
+                })()}
+              </div>
+            )}
+          </div>
 
           {/* Agent Context Button */}
           <button
@@ -4955,6 +6038,11 @@ showScenarioConfirmation(scenarioName, currentAgentRef.current);
             </div>,
             document.body,
           )}
+        <OrchestrationDiagramModal
+          open={showOrchestrationDiagram}
+          onClose={() => setShowOrchestrationDiagram(false)}
+          initialMode={liveSettingsMode}
+        />
         {showDemoForm && typeof document !== 'undefined' &&
           createPortal(
             <>
@@ -4995,6 +6083,78 @@ showScenarioConfirmation(scenarioName, currentAgentRef.current);
       sessionMetrics={sessionMetrics}
       scenarioConfig={sessionScenarioConfig}
     />
+    {agentUpdateToast && createPortal(
+      <Box
+        role="status"
+        aria-live="polite"
+        sx={{
+          position: 'fixed',
+          top: 20,
+          left: 20,
+          zIndex: 2000,
+          width: 360,
+          maxWidth: 'calc(100vw - 40px)',
+          p: 1.75,
+          borderRadius: '14px',
+          color: '#e6edf3',
+          background: 'linear-gradient(135deg, rgba(30,41,59,0.98) 0%, rgba(15,23,42,0.98) 100%)',
+          border: '1px solid rgba(99,102,241,0.35)',
+          boxShadow: '0 12px 32px rgba(0,0,0,0.45)',
+          animation: 'agentToastIn 220ms ease-out',
+          '@keyframes agentToastIn': {
+            from: { opacity: 0, transform: 'translateY(-12px)' },
+            to: { opacity: 1, transform: 'translateY(0)' },
+          },
+        }}
+      >
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 0.75 }}>
+          <BuildRoundedIcon sx={{ fontSize: 18, color: '#a5b4fc' }} />
+          <Typography sx={{ fontSize: 13, fontWeight: 700, flex: 1, letterSpacing: 0.2 }}>
+            {agentUpdateToast.action === 'created' ? 'Agent created' : 'Agent updated'}
+          </Typography>
+          <IconButton
+            size="small"
+            onClick={dismissAgentUpdateToast}
+            sx={{ color: 'rgba(230,237,243,0.6)', p: 0.25, '&:hover': { color: '#e6edf3' } }}
+            aria-label="Dismiss"
+          >
+            <Typography component="span" sx={{ fontSize: 16, lineHeight: 1 }}>×</Typography>
+          </IconButton>
+        </Box>
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75, flexWrap: 'wrap', mb: 0.75 }}>
+          <Typography component="span" sx={{ fontSize: 13, fontWeight: 600, color: '#fff' }}>
+            {agentUpdateToast.name}
+          </Typography>
+          <Typography
+            component="span"
+            sx={{
+              fontSize: 11,
+              fontWeight: 600,
+              px: 0.75,
+              py: 0.25,
+              borderRadius: '999px',
+              backgroundColor: 'rgba(99,102,241,0.18)',
+              border: '1px solid rgba(99,102,241,0.4)',
+              color: '#c7d2fe',
+            }}
+          >
+            {agentUpdateToast.scenarioName}
+          </Typography>
+        </Box>
+        <Box component="ul" sx={{ m: 0, pl: 2, display: 'flex', flexDirection: 'column', gap: 0.25 }}>
+          {agentUpdateToast.changes.map((c, i) => (
+            <Typography
+              key={i}
+              component="li"
+              sx={{ fontSize: 12, color: 'rgba(230,237,243,0.85)' }}
+            >
+              {c}
+            </Typography>
+          ))}
+        </Box>
+      </Box>,
+      document.body
+    )}
     <AgentBuilder
       open={showAgentBuilder}
       onClose={() => setShowAgentBuilder(false)}
@@ -5007,6 +6167,7 @@ showScenarioConfirmation(scenarioName, currentAgentRef.current);
           statusCaption: `Tools: ${agentConfig.tools?.length || 0} · Voice: ${agentConfig.voice?.name || 'default'}`,
           statusLabel: "Agent Created",
         });
+        notifyAgentUpdate(agentConfig, 'created');
         // Note: Do NOT auto-select the created agent to prevent unintended scenario changes
         // User can explicitly select the agent if they want to use it
         fetchSessionAgentConfig();
@@ -5057,6 +6218,7 @@ showScenarioConfirmation(scenarioName, currentAgentRef.current);
           statusCaption: `Tools: ${agentConfig.tools?.length || 0} · Voice: ${agentConfig.voice?.name || 'default'}`,
           statusLabel: "Agent Updated",
         });
+        notifyAgentUpdate(agentConfig, 'updated');
         // Update the agent in inventory
         setAgentInventory((prev) => {
           if (!prev) return prev;
@@ -5084,8 +6246,9 @@ showScenarioConfirmation(scenarioName, currentAgentRef.current);
     />
     <AgentScenarioBuilder
       open={showAgentScenarioBuilder}
-      onClose={() => { setShowAgentScenarioBuilder(false); setBuilderScenarioCreateMode(false); }}
+      onClose={() => { setShowAgentScenarioBuilder(false); setBuilderScenarioCreateMode(false); setLiveEditAgentName(null); }}
       initialMode={builderInitialMode}
+      initialEditAgentName={liveEditAgentName}
       sessionId={sessionId}
       sessionProfile={activeSessionProfile}
       scenarioEditMode={builderInitialMode === 'scenarios' && builderScenarioCreateMode ? false : customScenarios.length > 0}
@@ -5104,6 +6267,7 @@ showScenarioConfirmation(scenarioName, currentAgentRef.current);
           statusCaption: `Tools: ${agentConfig.tools?.length || 0} · Voice: ${agentConfig.voice?.name || 'default'}`,
           statusLabel: "Agent Created",
         });
+        notifyAgentUpdate(agentConfig, 'created');
         // Note: Do NOT auto-select the created agent to prevent unintended scenario changes
         // User can explicitly select the agent if they want to use it
         fetchSessionAgentConfig();
@@ -5151,6 +6315,7 @@ showScenarioConfirmation(scenarioName, currentAgentRef.current);
           statusCaption: `Tools: ${agentConfig.tools?.length || 0} · Voice: ${agentConfig.voice?.name || 'default'}`,
           statusLabel: "Agent Updated",
         });
+        notifyAgentUpdate(agentConfig, 'updated');
         setAgentInventory((prev) => {
           if (!prev) return prev;
           return {
@@ -5172,6 +6337,31 @@ showScenarioConfirmation(scenarioName, currentAgentRef.current);
             ),
           };
         });
+
+        // Live-agent quick edit: if this edit was launched from the "Edit live
+        // agent" action and a call/stream is currently active, end it and
+        // reinitiate from the client so the backend re-resolves the edited
+        // agent (model/voice/prompt) at reconnect. Mirrors the scenario-switch
+        // restart flow. Snapshots are read fresh from render scope.
+        if (liveEditAgentName) {
+          const wasCallActive = callActive;
+          const wasRecording = recording;
+          setLiveEditAgentName(null);
+          setShowAgentScenarioBuilder(false);
+          if (wasCallActive) {
+            appendLog(`🔄 Restarting call to apply edited agent "${agentConfig.name}"…`);
+            terminateACSCall();
+            setTimeout(() => {
+              handlePhoneButtonClick();
+            }, 600);
+          } else if (wasRecording) {
+            appendLog(`🔄 Reconnecting stream to apply edited agent "${agentConfig.name}"…`);
+            handleMicToggle();
+            setTimeout(() => {
+              handleMicToggle();
+            }, 600);
+          }
+        }
       }}
       onScenarioCreated={async (scenarioConfig) => {
         appendLog(`🎭 Scenario created: ${scenarioConfig.name || 'Custom Scenario'}`);
