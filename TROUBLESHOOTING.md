@@ -109,6 +109,32 @@ winget install jqlang.jq
 
 ---
 
+### `/bin/bash: C:/Users/.../azd-preprovision-*.sh: No such file or directory`
+
+This occurs on Windows when `azd` resolves `bash.exe` to WSL. WSL's `/bin/bash` cannot open the
+Windows temp-file path generated for an `azd` hook.
+
+The repository uses a Windows-specific PowerShell hook launcher that selects Git Bash explicitly.
+Install Git for Windows if it is not already available:
+
+```powershell
+winget install --id Git.Git -e
+```
+
+Then open a new terminal and rerun:
+
+```powershell
+azd provision
+```
+
+`preprovision` is a lifecycle hook, not an `azd` subcommand. To run it by itself, use:
+
+```powershell
+azd hooks run preprovision
+```
+
+---
+
 ### "bad interpreter" or script execution errors (Windows line endings)
 
 **Error:** `/bin/bash^M: bad interpreter: No such file or directory`

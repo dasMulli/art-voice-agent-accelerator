@@ -11,10 +11,46 @@
   "redis_port": 10000,
   "model_deployments": [
     {
-      "name": "o3-mini",
-      "version": "2025-01-31",
+      "name": "o3",
+      "version": "2025-04-16",
       "sku_name": "GlobalStandard",
       "capacity": 3000
+    },
+    {
+      "name": "gpt-5.6-sol",
+      "version": "2026-07-09",
+      "sku_name": "GlobalStandard",
+      "capacity": 10
+    },
+    {
+      "name": "gpt-5.6-terra",
+      "version": "2026-07-09",
+      "sku_name": "GlobalStandard",
+      "capacity": 10
+    },
+    {
+      "name": "gpt-5.6-luna",
+      "version": "2026-07-09",
+      "sku_name": "GlobalStandard",
+      "capacity": 10
+    },
+    {
+      "name": "gpt-audio-1.5",
+      "version": "2026-02-23",
+      "sku_name": "GlobalStandard",
+      "capacity": 10
+    },
+    {
+      "name": "gpt-realtime-2.1",
+      "version": "2026-07-07",
+      "sku_name": "GlobalStandard",
+      "capacity": 4
+    },
+    {
+      "name": "gpt-realtime-2.1-mini",
+      "version": "2026-07-07",
+      "sku_name": "GlobalStandard",
+      "capacity": 4
     },
     {
       "name": "gpt-4o",

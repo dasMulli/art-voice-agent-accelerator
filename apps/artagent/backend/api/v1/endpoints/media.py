@@ -15,6 +15,7 @@ WebSocket Flow:
 import asyncio
 import json
 import uuid
+from typing import Any
 
 from apps.artagent.backend.src.ws_helpers.shared_ws import send_agent_inventory
 from apps.artagent.backend.voice import (
@@ -96,6 +97,53 @@ async def _resolve_session_id(
     return f"media_{call_connection_id}" if call_connection_id else f"media_{uuid.uuid4().hex[:8]}"
 
 
+async def _resolve_call_context(
+    app_state: Any,
+    call_connection_id: str | None,
+    session_id: str | None = None,
+) -> dict[str, Any]:
+    """Load outbound call context registered before the media connection."""
+    if not app_state or not call_connection_id:
+        return {}
+    conn_manager = getattr(app_state, "conn_manager", None)
+    if conn_manager is not None and hasattr(conn_manager, "get_call_context"):
+        try:
+            context = await conn_manager.get_call_context(call_connection_id)
+            if context:
+                return context
+        except Exception as exc:
+            logger.warning("Failed to resolve local context for call %s: %s", call_connection_id, exc)
+
+    redis_mgr = getattr(app_state, "redis", None)
+    if redis_mgr is None:
+        return {}
+    try:
+        for memory_id in (call_connection_id, session_id):
+            if not memory_id:
+                continue
+            key = MemoManager.build_redis_key(memory_id)
+            data = await redis_mgr.get_session_data_async(key)
+            raw_context = data.get("corememory") if data else None
+            if isinstance(raw_context, bytes):
+                raw_context = raw_context.decode("utf-8")
+            context = json.loads(raw_context) if raw_context else {}
+            if isinstance(context, dict) and context.get("scenario"):
+                return context
+        return {}
+    except Exception as exc:
+        logger.warning("Failed to resolve persisted context for call %s: %s", call_connection_id, exc)
+        return {}
+
+
+def _apply_call_context(
+    memory_manager: MemoManager,
+    call_context: dict[str, Any],
+) -> None:
+    """Copy registered outbound context into session core memory."""
+    for key, value in call_context.items():
+        memory_manager.set_corememory(key, value)
+
+
 # ============================================================================
 # REST Endpoints
 # ============================================================================
@@ -169,6 +217,11 @@ async def acs_media_stream(websocket: WebSocket) -> None:
     session_id = await _resolve_session_id(
         websocket.app.state, call_connection_id, query_params, headers_dict
     )
+    call_context = await _resolve_call_context(
+        websocket.app.state,
+        call_connection_id,
+        session_id,
+    )
 
     # Wrap entire session in session_context for automatic correlation
     # All logs and spans within this block inherit call_connection_id and session_id
@@ -232,6 +285,7 @@ async def acs_media_stream(websocket: WebSocket) -> None:
                     call_connection_id=call_connection_id,
                     session_id=session_id,
                     stream_mode=stream_mode,
+                    call_context=call_context,
                 )
 
                 # Store handler in connection metadata
@@ -268,15 +322,27 @@ async def _create_media_handler(
     call_connection_id: str,
     session_id: str,
     stream_mode: StreamMode,
+    call_context: dict[str, Any] | None = None,
 ):
     """Create appropriate media handler based on streaming mode."""
+    call_context = call_context or {}
+    scenario = call_context.get("scenario") or call_context.get("scenario_name")
     if stream_mode == StreamMode.MEDIA:
+        redis_mgr = getattr(websocket.app.state, "redis", None)
+        if redis_mgr and call_context:
+            memory_manager = MemoManager.from_redis(call_connection_id, redis_mgr)
+            _apply_call_context(memory_manager, call_context)
+            await memory_manager.persist_to_redis_async(
+                redis_mgr,
+                raise_on_failure=True,
+            )
         config = VoiceHandlerConfig(
             websocket=websocket,
             session_id=session_id,
             transport=TransportType.ACS,
             call_connection_id=call_connection_id,
             stream_mode=stream_mode,
+            scenario=scenario,
         )
         return await VoiceHandler.create(config, websocket.app.state)
     elif stream_mode == StreamMode.VOICE_LIVE:
@@ -293,9 +359,17 @@ async def _create_media_handler(
             if redis_mgr
             else MemoManager(session_id=session_id)
         )
+        _apply_call_context(memory_manager, call_context)
+        if redis_mgr and call_context:
+            await memory_manager.persist_to_redis_async(
+                redis_mgr,
+                raise_on_failure=True,
+            )
 
         # Set up session context on websocket.state (consistent with browser.py)
         websocket.state.cm = memory_manager
+        if scenario:
+            websocket.state.scenario = scenario
         websocket.state.session_context = SessionContext(
             session_id=session_id,
             memory_manager=memory_manager,

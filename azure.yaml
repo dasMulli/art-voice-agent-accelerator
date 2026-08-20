@@ -41,19 +41,37 @@ services:
 
 hooks:
   preprovision:
-    shell: sh
-    run: devops/scripts/azd/preprovision.sh terraform
-    interactive: true
-    continueOnError: false
+    windows:
+      shell: pwsh
+      run: ./devops/scripts/azd/invoke-bash-hook.ps1 ./devops/scripts/azd/preprovision.sh terraform
+      interactive: true
+      continueOnError: false
+    posix:
+      shell: sh
+      run: devops/scripts/azd/preprovision.sh terraform
+      interactive: true
+      continueOnError: false
 
   postprovision:
-    shell: sh
-    run: devops/scripts/azd/postprovision.sh
-    interactive: true
-    continueOnError: false
+    windows:
+      shell: pwsh
+      run: ./devops/scripts/azd/invoke-bash-hook.ps1 ./devops/scripts/azd/postprovision.sh
+      interactive: true
+      continueOnError: false
+    posix:
+      shell: sh
+      run: devops/scripts/azd/postprovision.sh
+      interactive: true
+      continueOnError: false
 
   postdown:
-    shell: sh
-    run: devops/scripts/azd/postdown.sh
-    interactive: true
-    continueOnError: true
+    windows:
+      shell: pwsh
+      run: ./devops/scripts/azd/invoke-bash-hook.ps1 ./devops/scripts/azd/postdown.sh
+      interactive: true
+      continueOnError: true
+    posix:
+      shell: sh
+      run: devops/scripts/azd/postdown.sh
+      interactive: true
+      continueOnError: true

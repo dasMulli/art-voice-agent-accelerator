@@ -35,6 +35,12 @@ model_deployments = [
       capacity = 50
     },
     {
+      name     = "o3"
+      version  = "2025-04-16"
+      sku_name = "DataZoneStandard"
+      capacity = 50
+    },
+    {
       name     = "gpt-4.1-mini"
       version  = "2025-04-14"
       sku_name = "DataZoneStandard"

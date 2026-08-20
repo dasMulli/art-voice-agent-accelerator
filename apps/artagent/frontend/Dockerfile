@@ -31,8 +31,8 @@ COPY entrypoint.sh ./
 # Install production dependencies only
 RUN npm ci --omit=dev
 
-# Make entrypoint executable
-RUN chmod +x entrypoint.sh
+# Normalize Windows checkouts and make the entrypoint executable
+RUN sed -i 's/\r$//' entrypoint.sh && chmod +x entrypoint.sh
 
 # Expose port
 EXPOSE 8080

@@ -52,7 +52,7 @@ variable "cosmosdb_public_network_access_enabled" {
 variable "tags" {
   description = "Additional tags merged onto every resource. Use this to attach org policy-exemption tags (e.g. SecurityControl/SecurityControls = Ignore) that keep public network access enabled. Set to {} to add nothing."
   type        = map(string)
-  default = {}
+  default     = {}
 }
 
 variable "principal_id" {
@@ -163,6 +163,18 @@ variable "voice_live_model_deployments" {
       capacity = 4
     },
     {
+      name     = "gpt-realtime-2.1"
+      version  = "2026-07-07"
+      sku_name = "GlobalStandard"
+      capacity = 4
+    },
+    {
+      name     = "gpt-realtime-2.1-mini"
+      version  = "2026-07-07"
+      sku_name = "GlobalStandard"
+      capacity = 4
+    },
+    {
       name     = "gpt-4o-transcribe"
       version  = "2025-03-20"
       sku_name = "GlobalStandard"
@@ -193,8 +205,8 @@ variable "model_deployments" {
       capacity = 150
     },
     {
-      name     = "o3-mini"
-      version  = "2025-01-31"
+      name     = "o3"
+      version  = "2025-04-16"
       sku_name = "DataZoneStandard"
       capacity = 50
     },
@@ -209,6 +221,42 @@ variable "model_deployments" {
       version  = "1"
       sku_name = "GlobalStandard"
       capacity = 100
+    },
+    {
+      name     = "gpt-5.6-sol"
+      version  = "2026-07-09"
+      sku_name = "GlobalStandard"
+      capacity = 10
+    },
+    {
+      name     = "gpt-5.6-terra"
+      version  = "2026-07-09"
+      sku_name = "GlobalStandard"
+      capacity = 10
+    },
+    {
+      name     = "gpt-5.6-luna"
+      version  = "2026-07-09"
+      sku_name = "GlobalStandard"
+      capacity = 10
+    },
+    {
+      name     = "gpt-audio-1.5"
+      version  = "2026-02-23"
+      sku_name = "GlobalStandard"
+      capacity = 10
+    },
+    {
+      name     = "gpt-realtime-2.1"
+      version  = "2026-07-07"
+      sku_name = "GlobalStandard"
+      capacity = 4
+    },
+    {
+      name     = "gpt-realtime-2.1-mini"
+      version  = "2026-07-07"
+      sku_name = "GlobalStandard"
+      capacity = 4
     },
   ]
 }

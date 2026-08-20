@@ -924,6 +924,7 @@ class CascadeOrchestratorAdapter:
             "memo_manager": cm,
             "session_profile": cm.get_value_from_corememory("session_profile"),
             "caller_name": cm.get_value_from_corememory("caller_name"),
+            "caller_id": cm.get_value_from_corememory("caller_id"),
             "client_id": cm.get_value_from_corememory("client_id"),
             "customer_intelligence": cm.get_value_from_corememory("customer_intelligence"),
             "institution_name": cm.get_value_from_corememory("institution_name"),
@@ -931,6 +932,11 @@ class CascadeOrchestratorAdapter:
             "previous_agent": cm.get_value_from_corememory("previous_agent"),
             "visited_agents": cm.get_value_from_corememory("visited_agents"),
             "handoff_context": cm.get_value_from_corememory("handoff_context"),
+            "ticket_id": cm.get_value_from_corememory("ticket_id"),
+            "work_item_id": cm.get_value_from_corememory("work_item_id"),
+            "call_id": cm.get_value_from_corememory("call_id"),
+            "ticket": cm.get_value_from_corememory("ticket"),
+            "work_item": cm.get_value_from_corememory("work_item"),
         }
 
     # ─────────────────────────────────────────────────────────────────

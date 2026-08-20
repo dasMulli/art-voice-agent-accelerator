@@ -65,6 +65,7 @@ from lifecycle.steps import (
     register_event_handlers_step,
     register_external_services_step,
     register_mcp_servers_step,
+    register_service_desk_dispatcher_step,
     register_speech_pools_step,
     register_warmup_step,
 )
@@ -115,6 +116,7 @@ async def lifespan(app: FastAPI):
     register_warmup_step(manager, app)  # deferred=True
     register_external_services_step(manager, app)
     register_agents_step(manager, app)
+    register_service_desk_dispatcher_step(manager, app)
     register_mcp_servers_step(manager, app)  # deferred=True
     register_event_handlers_step(manager, app)
 

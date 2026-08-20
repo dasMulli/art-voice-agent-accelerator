@@ -1,0 +1,22 @@
+name: service_desk
+description: Service desk ticket intake and outbound confirmation workflow
+icon: "🎧"
+
+# Inbound calls begin with intake. Generated outbound confirmation calls select
+# StandbyConfirmationAgent explicitly from this scenario's agent list.
+start_agent: ServiceDeskIntakeAgent
+
+agents:
+  - ServiceDeskIntakeAgent
+  - StandbyConfirmationAgent
+
+# Intake and confirmation are separate calls, not conversational handoffs.
+handoffs: []
+
+generic_handoff:
+  enabled: false
+
+agent_defaults:
+  industry: "service desk"
+  compliance_required: true
+  region: "US"

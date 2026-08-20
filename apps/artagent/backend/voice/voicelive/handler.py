@@ -1304,8 +1304,14 @@ class VoiceLiveSDKHandler:
                         for key in (
                             "client_id",
                             "caller_name",
+                            "caller_id",
                             "customer_intelligence",
                             "institution_name",
+                            "ticket_id",
+                            "work_item_id",
+                            "call_id",
+                            "ticket",
+                            "work_item",
                         ):
                             val = memo_manager.get_value_from_corememory(key)
                             if val:
@@ -1315,6 +1321,19 @@ class VoiceLiveSDKHandler:
                                 "🔄 Restored partial context from memory | client_id=%s",
                                 system_vars.get("client_id"),
                             )
+
+                if memo_manager and hasattr(memo_manager, "get_value_from_corememory"):
+                    for key in (
+                        "caller_id",
+                        "ticket_id",
+                        "work_item_id",
+                        "call_id",
+                        "ticket",
+                        "work_item",
+                    ):
+                        value = memo_manager.get_value_from_corememory(key)
+                        if value is not None:
+                            system_vars[key] = value
 
                 await self._orchestrator.start(system_vars=system_vars)
 

@@ -435,6 +435,13 @@ jobs:
           echo "Git Bash version:"
           & "C:\Program Files\Git\bin\bash.exe" --version
 
+      - name: 📜 Validate Windows Hook Launcher
+        shell: pwsh
+        run: |
+          $testScript = Join-Path $env:RUNNER_TEMP "azd-hook-smoke-test.sh"
+          Set-Content -LiteralPath $testScript -Value 'printf "Git Bash hook launcher works\n"'
+          ./devops/scripts/azd/invoke-bash-hook.ps1 $testScript
+
       - name: 🔧 Setup Azure CLI
         run: |
           # Azure CLI is pre-installed on Windows GitHub runners

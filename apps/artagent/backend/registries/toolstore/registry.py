@@ -406,6 +406,12 @@ def initialize_tools() -> int:
             ),
         ),
         (
+            "service_desk",
+            lambda: __import__(
+                "apps.artagent.backend.registries.toolstore.service_desk", fromlist=[""]
+            ),
+        ),
+        (
             "transfer_agency",
             lambda: __import__(
                 "apps.artagent.backend.registries.toolstore.transfer_agency", fromlist=[""]

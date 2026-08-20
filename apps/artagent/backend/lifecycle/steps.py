@@ -448,6 +448,53 @@ def register_agents_step(manager: LifecycleManager, app: FastAPI) -> None:
     manager.add_step("agents", start)
 
 
+def register_service_desk_dispatcher_step(
+    manager: LifecycleManager,
+    app: FastAPI,
+) -> None:
+    """Register the service desk outbound dispatcher lifecycle step."""
+    from apps.artagent.backend.registries.toolstore.service_desk import (
+        configure_service_desk_store,
+    )
+    from apps.artagent.backend.src.services.service_desk.dispatcher import (
+        ServiceDeskDispatcher,
+    )
+    from apps.artagent.backend.src.services.service_desk.store import (
+        ServiceDeskStore,
+    )
+
+    async def start() -> None:
+        try:
+            store = ServiceDeskStore(app.state.cosmos)
+        except ValueError as exc:
+            configure_service_desk_store(None)
+            app.state.service_desk_store = None
+            app.state.service_desk_dispatcher = None
+            logger.warning("Service desk dispatcher disabled: %s", exc)
+            return
+
+        configure_service_desk_store(store)
+        app.state.service_desk_store = store
+        dispatcher = ServiceDeskDispatcher(
+            store=store,
+            acs_caller=app.state.acs_caller,
+            redis_mgr=app.state.redis,
+            conn_manager=app.state.conn_manager,
+            app_state=app.state,
+        )
+        app.state.service_desk_dispatcher = dispatcher
+        await dispatcher.start()
+
+    async def stop() -> None:
+        dispatcher = getattr(app.state, "service_desk_dispatcher", None)
+        if dispatcher is not None:
+            await dispatcher.stop()
+        configure_service_desk_store(None)
+        app.state.service_desk_store = None
+
+    manager.add_step("service-desk", start, stop)
+
+
 # ============================================================================
 # Step 7: MCP Server Validation and Tool Registration
 # ============================================================================

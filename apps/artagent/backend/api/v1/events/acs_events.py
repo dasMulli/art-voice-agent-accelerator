@@ -328,6 +328,11 @@ class CallEventHandlers:
             )
 
             CallEventHandlers._signal_acs_disconnect(context)
+            await CallEventHandlers._notify_service_desk_outcome(
+                context,
+                "handle_call_disconnected",
+                disconnect_reason or "call disconnected",
+            )
 
             # Notify session listeners about the disconnect event
             session_id = await CallEventHandlers._resolve_session_id(context)
@@ -709,6 +714,40 @@ class CallEventHandlers:
             result_info = context.get_event_field("resultInformation", {})
             logger.error(
                 f"❌ Create call failed: {context.call_connection_id}, reason: {result_info}"
+            )
+            reason = (
+                result_info.get("message")
+                if isinstance(result_info, dict)
+                else str(result_info or "create call failed")
+            )
+            await CallEventHandlers._notify_service_desk_outcome(
+                context,
+                "handle_create_call_failed",
+                reason or "create call failed",
+            )
+
+    @staticmethod
+    async def _notify_service_desk_outcome(
+        context: CallEventContext,
+        method_name: str,
+        reason: str,
+    ) -> None:
+        """Notify the app-scoped service desk dispatcher of an ACS outcome."""
+        app_state = getattr(context, "app_state", None)
+        dispatcher = getattr(app_state, "service_desk_dispatcher", None)
+        if dispatcher is None or not context.call_connection_id:
+            return
+        method = getattr(dispatcher, method_name, None)
+        if method is None:
+            logger.error("Service desk dispatcher has no outcome handler %s", method_name)
+            return
+        try:
+            await method(context.call_connection_id, reason)
+        except Exception:
+            logger.exception(
+                "Failed to process service desk outcome %s for call %s",
+                method_name,
+                context.call_connection_id,
             )
 
     @staticmethod
