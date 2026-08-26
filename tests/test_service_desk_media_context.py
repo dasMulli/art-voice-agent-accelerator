@@ -3,7 +3,10 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from apps.artagent.backend.api.v1.endpoints.media import _create_media_handler
+from apps.artagent.backend.api.v1.endpoints.media import (
+    _create_media_handler,
+    _resolve_call_context,
+)
 from src.enums.stream_modes import StreamMode
 
 
@@ -96,3 +99,72 @@ async def test_voicelive_handler_receives_scenario_and_corememory_context() -> N
         "StandbyConfirmationAgent"
     )
     assert websocket.state.cm.get_value_from_corememory("ticket")["ticket_id"] == "SD-1"
+
+
+@pytest.mark.asyncio
+async def test_voicelive_media_session_inherits_inbound_caller_context() -> None:
+    websocket = make_websocket()
+    redis = websocket.app.state.redis
+    redis.sessions["session:call-1"] = {
+        "corememory": json.dumps(
+            {
+                "call_direction": "inbound",
+                "caller_id": "+1987654321",
+            }
+        )
+    }
+    context = await _resolve_call_context(
+        websocket.app.state,
+        "call-1",
+        "media_call-1",
+    )
+
+    with patch(
+        "apps.artagent.backend.api.v1.endpoints.media.consume_voicelive_call_warmup",
+        new=AsyncMock(return_value=None),
+    ), patch(
+        "apps.artagent.backend.api.v1.endpoints.media.VoiceLiveSDKHandler",
+        return_value=object(),
+    ):
+        await _create_media_handler(
+            websocket=websocket,
+            call_connection_id="call-1",
+            session_id="media_call-1",
+            stream_mode=StreamMode.VOICE_LIVE,
+            call_context=context,
+        )
+
+    assert websocket.state.cm.get_value_from_corememory("caller_id") == "+1987654321"
+
+
+@pytest.mark.asyncio
+async def test_call_and_session_contexts_are_merged_for_cross_worker_media() -> None:
+    websocket = make_websocket()
+    redis = websocket.app.state.redis
+    redis.sessions["session:call-1"] = {
+        "corememory": json.dumps(
+            {
+                "call_direction": "inbound",
+                "caller_id": "+1987654321",
+                "scenario": "legacy-call-scenario",
+            }
+        )
+    }
+    redis.sessions["session:session-1"] = {
+        "corememory": json.dumps(
+            {
+                "scenario": "service_desk",
+                "active_agent": "ServiceDeskIntakeAgent",
+            }
+        )
+    }
+
+    context = await _resolve_call_context(
+        websocket.app.state,
+        "call-1",
+        "session-1",
+    )
+
+    assert context["caller_id"] == "+1987654321"
+    assert context["scenario"] == "service_desk"
+    assert context["active_agent"] == "ServiceDeskIntakeAgent"

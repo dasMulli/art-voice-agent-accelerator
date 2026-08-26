@@ -236,6 +236,49 @@ class TestV1EventsIntegration:
             assert emit_args[1] == "test_call_123"  # call_connection_id
             assert emit_args[2]["target_number"] == "+1234567890"  # data
 
+    async def test_incoming_call_persists_raw_caller_context(
+        self,
+        mock_acs_caller,
+        mock_redis_mgr,
+    ):
+        """Test that the answered call ID owns durable inbound caller context."""
+        handler = ACSLifecycleHandler()
+        memory_manager = MagicMock()
+        memory_manager.persist_to_redis_async = AsyncMock()
+        event_data = {
+            "from": {
+                "kind": "phoneNumber",
+                "phoneNumber": {"value": "+1987654321"},
+            },
+            "incomingCallContext": "incoming-context",
+        }
+
+        with patch(
+            "apps.artagent.backend.api.v1.handlers.acs_call_lifecycle."
+            "MemoManager.from_redis",
+            return_value=memory_manager,
+        ) as from_redis:
+            response = await handler._handle_incoming_call(
+                event_data,
+                mock_acs_caller,
+                MagicMock(),
+                redis_mgr=mock_redis_mgr,
+            )
+
+        assert response.status_code == 200
+        from_redis.assert_called_once_with("test_call_456", mock_redis_mgr)
+        updates = {
+            call.args[0]: call.args[1]
+            for call in memory_manager.update_context.call_args_list
+        }
+        assert updates["call_direction"] == "inbound"
+        assert updates["caller_id"] == "+1987654321"
+        assert updates["caller_info"] == event_data["from"]
+        memory_manager.persist_to_redis_async.assert_awaited_once_with(
+            mock_redis_mgr,
+            raise_on_failure=True,
+        )
+
     async def test_event_context_data_extraction(self):
         """Test event context data extraction methods."""
         # Test with dict data

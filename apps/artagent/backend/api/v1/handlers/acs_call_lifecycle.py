@@ -612,6 +612,22 @@ class ACSLifecycleHandler:
                         call_connection_id,
                         exc,
                     )
+                try:
+                    memory_manager = MemoManager.from_redis(call_connection_id, redis_mgr)
+                    memory_manager.update_context("call_direction", "inbound")
+                    memory_manager.update_context("caller_id", caller_id)
+                    memory_manager.update_context("caller_info", caller_info)
+                    memory_manager.update_context("api_version", "v1")
+                    await memory_manager.persist_to_redis_async(
+                        redis_mgr,
+                        raise_on_failure=True,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to persist inbound caller context for call %s: %s",
+                        call_connection_id,
+                        exc,
+                    )
 
             logger.info(
                 f"✅ Call answered successfully: {call_connection_id} (latency: {latency:.3f}s)"

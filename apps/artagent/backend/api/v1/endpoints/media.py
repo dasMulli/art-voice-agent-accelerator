@@ -118,6 +118,7 @@ async def _resolve_call_context(
     if redis_mgr is None:
         return {}
     try:
+        resolved_context: dict[str, Any] = {}
         for memory_id in (call_connection_id, session_id):
             if not memory_id:
                 continue
@@ -127,9 +128,9 @@ async def _resolve_call_context(
             if isinstance(raw_context, bytes):
                 raw_context = raw_context.decode("utf-8")
             context = json.loads(raw_context) if raw_context else {}
-            if isinstance(context, dict) and context.get("scenario"):
-                return context
-        return {}
+            if isinstance(context, dict) and context:
+                resolved_context.update(context)
+        return resolved_context
     except Exception as exc:
         logger.warning("Failed to resolve persisted context for call %s: %s", call_connection_id, exc)
         return {}
