@@ -61,6 +61,9 @@ def _attempt_history(work_item: dict | None) -> list[AttemptHistoryEntry]:
                 or work_item.get("expired_at")
             ),
             reason=work_item.get("last_release_reason"),
+            round_number=work_item.get("round_number"),
+            target_index=work_item.get("current_target_index"),
+            target_number=work_item.get("current_target_number"),
         )
     ]
 

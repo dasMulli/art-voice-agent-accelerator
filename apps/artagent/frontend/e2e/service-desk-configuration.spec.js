@@ -20,12 +20,12 @@ const initialConfiguration = () => ({
     {
       service_id: 'email',
       name: 'Email',
-      phone_number: '+14255550201',
+      phone_numbers: ['+14255550201'],
     },
     {
       service_id: 'vpn',
       name: 'VPN',
-      phone_number: '+14255550204',
+      phone_numbers: ['+14255550204'],
     },
   ],
   created_at: '2026-08-25T12:00:00Z',
@@ -132,10 +132,12 @@ test('edits retry intervals and service routes', async ({ page }) => {
 
   await page.getByLabel('Retry intervals in minutes').fill('1;2;5;10;30');
   await page.getByLabel('Service name 1').fill('Messaging');
-  await page.getByLabel('Service call number 1').fill('+14255550999');
+  await page
+    .getByLabel('Service call targets 1')
+    .fill('+14255550999;%initial_caller%;+14255550998');
   await page.getByRole('button', { name: 'Add service' }).click();
   await page.getByLabel('Service name 3').fill('Identity Platform');
-  await page.getByLabel('Service call number 3').fill('+14255550888');
+  await page.getByLabel('Service call targets 3').fill('+14255550888');
   await page.getByRole('button', { name: 'Save' }).click();
 
   await expect(page.getByText('Service desk configuration saved.')).toBeVisible();
@@ -143,12 +145,12 @@ test('edits retry intervals and service routes', async ({ page }) => {
   expect(state.lastUpdate.services[0]).toMatchObject({
     service_id: 'email',
     name: 'Messaging',
-    phone_number: '+14255550999',
+    phone_numbers: ['+14255550999', '%initial_caller%', '+14255550998'],
   });
   expect(state.lastUpdate.services[2]).toMatchObject({
     service_id: null,
     name: 'Identity Platform',
-    phone_number: '+14255550888',
+    phone_numbers: ['+14255550888'],
   });
 });
 
@@ -160,6 +162,19 @@ test('validates retry intervals before saving', async ({ page }) => {
   await page.getByRole('button', { name: 'Save' }).click();
 
   await expect(page.getByText('Retry intervals must be whole minutes from 1 to 1440.')).toBeVisible();
+  expect(state.lastUpdate).toBeNull();
+});
+
+test('validates callback target syntax before saving', async ({ page }) => {
+  const state = await installConfigurationMock(page);
+  await openSettings(page);
+
+  await page.getByLabel('Service call targets 1').fill('+14255550999;initial_caller');
+  await page.getByRole('button', { name: 'Save' }).click();
+
+  await expect(
+    page.getByText('Enter E.164 numbers or %initial_caller% for Email.'),
+  ).toBeVisible();
   expect(state.lastUpdate).toBeNull();
 });
 

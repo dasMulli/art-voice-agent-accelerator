@@ -1758,6 +1758,9 @@ class LiveOrchestrator:
                 client_id = self._memo_manager.get_value_from_corememory("client_id")
                 if client_id:
                     args["_client_id"] = client_id
+                caller_id = self._memo_manager.get_value_from_corememory("caller_id")
+                if caller_id:
+                    args["_initial_caller"] = caller_id
             args["_call_connection_id"] = self.call_connection_id or ""
             args["_session_id"] = session_id or ""
 

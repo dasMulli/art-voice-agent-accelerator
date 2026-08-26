@@ -32,6 +32,7 @@ def make_work_item() -> dict[str, object]:
         "work_item_id": "WI-1",
         "ticket_id": "SD-1",
         "callback_number": "+14255550101",
+        "initial_caller_number": "+14255550101",
         "standby_number": "+14255550201",
         "attempt_count": 0,
     }
@@ -54,7 +55,16 @@ async def test_dispatch_once_claims_calls_and_attaches_confirmation_context() ->
             return_value={
                 "service_id": "vpn",
                 "name": "Remote Access",
-                "phone_number": "+14255550999",
+                "phone_numbers": ["+14255550999", "%initial_caller%"],
+            }
+        ),
+        prepare_round_targets=AsyncMock(
+            return_value={
+                **work_item,
+                "round_number": 1,
+                "round_targets": ["+14255550999", "+14255550101"],
+                "current_target_index": 0,
+                "current_target_number": "+14255550999",
             }
         ),
         mark_attempt_started=AsyncMock(return_value={**work_item, "status": "calling"}),
@@ -63,16 +73,12 @@ async def test_dispatch_once_claims_calls_and_attaches_confirmation_context() ->
         list_work_items=AsyncMock(return_value=[]),
     )
     lifecycle_handler = SimpleNamespace(
-        start_outbound_call=AsyncMock(
-            return_value={"status": "success", "callId": "call-1"}
-        )
+        start_outbound_call=AsyncMock(return_value={"status": "success", "callId": "call-1"})
     )
     redis = FakeRedis()
     conn_manager = SimpleNamespace(set_call_context=AsyncMock())
     standby_agent = MagicMock(name="standby-agent")
-    app_state = SimpleNamespace(
-        unified_agents={"StandbyConfirmationAgent": standby_agent}
-    )
+    app_state = SimpleNamespace(unified_agents={"StandbyConfirmationAgent": standby_agent})
     dispatcher = ServiceDeskDispatcher(
         store=store,
         acs_caller=object(),
@@ -83,28 +89,34 @@ async def test_dispatch_once_claims_calls_and_attaches_confirmation_context() ->
         worker_id="worker-1",
     )
 
-    with patch(
-        "apps.artagent.backend.src.services.service_desk.dispatcher.set_session_agent"
-    ) as set_session_agent, patch(
-        "apps.artagent.backend.src.services.service_desk.dispatcher."
-        "persist_session_agents_to_redis",
-        new=AsyncMock(),
-    ) as persist_agent, patch.object(
-        dispatcher,
-        "_start_voicelive_warmup",
+    with (
+        patch(
+            "apps.artagent.backend.src.services.service_desk.dispatcher.set_session_agent"
+        ) as set_session_agent,
+        patch(
+            "apps.artagent.backend.src.services.service_desk.dispatcher."
+            "persist_session_agents_to_redis",
+            new=AsyncMock(),
+        ) as persist_agent,
+        patch.object(
+            dispatcher,
+            "_start_voicelive_warmup",
+        ),
     ):
         await dispatcher.dispatch_once()
 
     lifecycle_handler.start_outbound_call.assert_awaited_once()
     assert (
-        lifecycle_handler.start_outbound_call.await_args.kwargs["target_number"]
-        == "+14255550999"
+        lifecycle_handler.start_outbound_call.await_args.kwargs["target_number"] == "+14255550999"
     )
     store.mark_attempt_started.assert_awaited_once_with(
         "WI-1",
         "worker-1",
         "call-1",
         attempt_number=1,
+        round_number=1,
+        target_index=0,
+        target_number="+14255550999",
     )
     context = conn_manager.set_call_context.await_args.args[1]
     assert context["scenario"] == "service_desk"
@@ -114,11 +126,13 @@ async def test_dispatch_once_claims_calls_and_attaches_confirmation_context() ->
     assert context["ticket"]["service_id"] == "vpn"
     assert context["work_item"]["work_item_id"] == "WI-1"
     assert context["work_item"]["standby_number"] == "+14255550999"
+    assert context["work_item"]["standby_numbers"] == [
+        "+14255550999",
+        "+14255550101",
+    ]
     assert context["call_id"] == "call-1"
     assert context["session_id"].startswith("service-desk-WI-1-")
-    set_session_agent.assert_called_once_with(
-        context["session_id"], standby_agent, set_active=True
-    )
+    set_session_agent.assert_called_once_with(context["session_id"], standby_agent, set_active=True)
     persist_agent.assert_awaited_once_with(context["session_id"])
 
     mapping = json.loads(redis.values["service_desk:call:call-1"])
@@ -127,9 +141,7 @@ async def test_dispatch_once_claims_calls_and_attaches_confirmation_context() ->
         "ticket_id": "SD-1",
         "worker_id": "worker-1",
     }
-    corememory = json.loads(
-        redis.sessions[f"session:{context['session_id']}"]["corememory"]
-    )
+    corememory = json.loads(redis.sessions[f"session:{context['session_id']}"]["corememory"])
     assert corememory["scenario_name"] == "service_desk"
     assert corememory["active_agent"] == "StandbyConfirmationAgent"
     call_corememory = json.loads(redis.sessions["session:call-1"]["corememory"])
@@ -149,7 +161,16 @@ async def test_failed_initiation_requeues_claimed_work() -> None:
             return_value={
                 "service_id": "email",
                 "name": "Email",
-                "phone_number": "+14255550201",
+                "phone_numbers": ["+14255550201"],
+            }
+        ),
+        prepare_round_targets=AsyncMock(
+            return_value={
+                **work_item,
+                "round_number": 1,
+                "round_targets": ["+14255550201"],
+                "current_target_index": 0,
+                "current_target_number": "+14255550201",
             }
         ),
         mark_attempt_started=AsyncMock(),
@@ -158,35 +179,80 @@ async def test_failed_initiation_requeues_claimed_work() -> None:
         list_work_items=AsyncMock(return_value=[]),
     )
     lifecycle_handler = SimpleNamespace(
-        start_outbound_call=AsyncMock(
-            return_value={"status": "failed", "message": "busy"}
-        )
+        start_outbound_call=AsyncMock(return_value={"status": "failed", "message": "busy"})
     )
     dispatcher = ServiceDeskDispatcher(
         store=store,
         acs_caller=object(),
         redis_mgr=FakeRedis(),
         conn_manager=SimpleNamespace(set_call_context=AsyncMock()),
-        app_state=SimpleNamespace(
-            unified_agents={"StandbyConfirmationAgent": MagicMock()}
-        ),
+        app_state=SimpleNamespace(unified_agents={"StandbyConfirmationAgent": MagicMock()}),
         lifecycle_handler=lifecycle_handler,
         worker_id="worker-1",
     )
 
-    with patch(
-        "apps.artagent.backend.src.services.service_desk.dispatcher.set_session_agent"
-    ), patch(
-        "apps.artagent.backend.src.services.service_desk.dispatcher."
-        "persist_session_agents_to_redis",
-        new=AsyncMock(),
+    with (
+        patch("apps.artagent.backend.src.services.service_desk.dispatcher.set_session_agent"),
+        patch(
+            "apps.artagent.backend.src.services.service_desk.dispatcher."
+            "persist_session_agents_to_redis",
+            new=AsyncMock(),
+        ),
     ):
         await dispatcher.dispatch_once()
 
-    store.release_after_failure.assert_awaited_once_with(
-        "WI-1", "worker-1", "busy"
-    )
+    store.release_after_failure.assert_awaited_once_with("WI-1", "worker-1", "busy")
     store.mark_attempt_started.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_unavailable_initial_caller_skips_empty_round_without_calling() -> None:
+    work_item = {**make_work_item(), "initial_caller_number": None}
+    store = SimpleNamespace(
+        reconcile_intake_disconnects=AsyncMock(return_value=0),
+        expire_overdue=AsyncMock(return_value=0),
+        claim_due_work=AsyncMock(side_effect=[work_item, None]),
+        get_ticket=AsyncMock(return_value={"ticket_id": "SD-1"}),
+        resolve_work_item_route=AsyncMock(
+            return_value={
+                "service_id": "email",
+                "name": "Email",
+                "phone_numbers": ["%initial_caller%"],
+            }
+        ),
+        prepare_round_targets=AsyncMock(
+            return_value={
+                **work_item,
+                "round_number": 1,
+                "round_targets": [],
+                "current_target_index": 0,
+                "current_target_number": None,
+            }
+        ),
+        release_after_failure=AsyncMock(),
+        renew_call_lease=AsyncMock(return_value=True),
+        list_work_items=AsyncMock(return_value=[]),
+    )
+    lifecycle_handler = SimpleNamespace(start_outbound_call=AsyncMock())
+    dispatcher = ServiceDeskDispatcher(
+        store=store,
+        acs_caller=object(),
+        redis_mgr=FakeRedis(),
+        conn_manager=SimpleNamespace(set_call_context=AsyncMock()),
+        app_state=SimpleNamespace(),
+        lifecycle_handler=lifecycle_handler,
+        worker_id="worker-1",
+    )
+
+    await dispatcher.dispatch_once()
+
+    store.prepare_round_targets.assert_awaited_once_with("WI-1", "worker-1", [])
+    store.release_after_failure.assert_awaited_once_with(
+        "WI-1",
+        "worker-1",
+        "no callback targets resolved for this round",
+    )
+    lifecycle_handler.start_outbound_call.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -248,9 +314,7 @@ async def test_intake_disconnect_enables_follow_up_work() -> None:
     await dispatcher.handle_call_disconnected("intake-call-1", "disconnected")
 
     store.record_intake_disconnect.assert_awaited_once_with("intake-call-1")
-    store.activate_after_intake_disconnect.assert_awaited_once_with(
-        call_id="intake-call-1"
-    )
+    store.activate_after_intake_disconnect.assert_awaited_once_with(call_id="intake-call-1")
     store.release_after_disconnect.assert_not_awaited()
 
 
@@ -282,9 +346,7 @@ async def test_incomplete_durable_mapping_is_ignored() -> None:
 @pytest.mark.asyncio
 async def test_unassociated_call_is_terminated_before_claim_release() -> None:
     call_connection = SimpleNamespace(hang_up=MagicMock())
-    acs_caller = SimpleNamespace(
-        get_call_connection=MagicMock(return_value=call_connection)
-    )
+    acs_caller = SimpleNamespace(get_call_connection=MagicMock(return_value=call_connection))
     store = SimpleNamespace(
         release_after_failure=AsyncMock(side_effect=[None, {"status": "retry"}])
     )
@@ -300,9 +362,7 @@ async def test_unassociated_call_is_terminated_before_claim_release() -> None:
     await dispatcher._compensate_unassociated_call("call-1", "WI-1")
 
     call_connection.hang_up.assert_called_once_with(is_for_everyone=True)
-    assert store.release_after_failure.await_args_list[0].kwargs == {
-        "call_id": "call-1"
-    }
+    assert store.release_after_failure.await_args_list[0].kwargs == {"call_id": "call-1"}
     assert store.release_after_failure.await_args_list[1].kwargs == {}
 
 

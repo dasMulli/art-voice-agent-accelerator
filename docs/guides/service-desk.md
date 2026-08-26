@@ -34,12 +34,17 @@ events and correction notes are appended to the ticket or work-item history.
 `correction_note`; the original submitted fields remain unchanged and the work
 item completes with corrections.
 
-The first outbound confirmation starts as soon as the intake call has disconnected.
-Later attempts use the retry sequence in the persisted Service Desk configuration.
-For example, `1;2;5;10;30` waits 1 minute after the first failed attempt, then 2,
-5, 10, and 30 minutes. The final value repeats for every later failure. Changing
-the sequence does not recalculate a retry that is already scheduled; the new
-sequence is used after the next failed or disconnected attempt.
+The first outbound confirmation round starts as soon as the intake call has
+disconnected. A round calls every configured target for the affected service in
+order, without a delay between targets. A target that answers and explicitly
+confirms the ticket ends the work immediately. Otherwise, a failed, silent, or
+disconnected call advances to the next target.
+
+After all targets in a round have been tried, the next round uses the retry sequence
+in the persisted Service Desk configuration. For example, `1;3;5` waits 1 minute
+after the first complete round, then 3 minutes after the second, and 5 minutes after
+the third. The final value repeats for every later round. Changing the sequence does
+not recalculate a retry that is already scheduled.
 
 Confirmation eligibility expires 24 hours after ticket creation. Voicemail,
 silence, and disconnected calls are not confirmations.
@@ -51,26 +56,35 @@ When **service_desk** is the active scenario, open the scenario selector and cho
 
 - The ordered retry sequence in minutes.
 - Service names presented by the intake agent.
-- The E.164 phone number called for each service.
+- The ordered callback targets called for each service.
 - Adding, renaming, and removing service routes.
 
 Retry values must be whole minutes from 1 through 1440. At least one and at most
-20 values are allowed. Service names must be unique regardless of case, and every
-phone number must use E.164 format, such as `+15551234567`.
+20 values are allowed. Service names must be unique regardless of case. Each service
+accepts one to 10 semicolon-separated callback targets. A target is either an E.164
+number, such as `+15551234567`, or the exact `%initial_caller%` placeholder.
+
+`%initial_caller%` resolves to the raw inbound ACS caller ID captured when the ticket
+was created. It does not use the callback number confirmed during intake. If the
+inbound call has no valid E.164 caller ID, that placeholder is skipped. Resolved
+duplicate numbers are called only once per round, preserving their first configured
+position.
 
 Configuration is global and stored in Cosmos DB. Updates use a revision check so
 one administrator cannot overwrite another administrator's changes. If a conflict
 occurs, the dialog reloads the latest saved values.
 
-Open callback work resolves the current service name and number before each call,
-so number and rename changes apply on its next attempt. A service cannot be removed
-while open callback work references it. Completed tickets keep their historical
-service snapshot.
+Open callback work snapshots the current service targets when a round starts, so a
+configuration change applies to its next round and cannot reorder one already in
+progress. A service cannot be removed while open callback work references it.
+Completed tickets keep their historical service snapshot.
 
 On first startup after upgrading, the application creates the configuration from
-the previous defaults: Email, Network, Payroll, and VPN routes with a single
-10-minute retry interval. Active legacy work items are linked to the corresponding
-stable service IDs without changing completed ticket history.
+the previous defaults: Email, Network, Payroll, and VPN routes with one callback
+target each and a single 10-minute retry interval. Existing single-number route
+documents are migrated to one-element target lists. Active legacy work items are
+linked to the corresponding stable service IDs and preserve their current retry
+position without changing completed ticket history.
 
 ## Intake call completion
 

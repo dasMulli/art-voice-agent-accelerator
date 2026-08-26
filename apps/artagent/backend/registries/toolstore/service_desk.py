@@ -204,9 +204,18 @@ async def create_service_desk_ticket(args: dict[str, Any]) -> dict[str, Any]:
     except ValueError as exc:
         return {"success": False, "message": str(exc)}
 
+    initial_caller_number: str | None = None
+    raw_initial_caller = str(args.get("_initial_caller") or "").strip()
+    if raw_initial_caller:
+        try:
+            initial_caller_number = normalize_e164(raw_initial_caller)
+        except ValueError:
+            initial_caller_number = None
+
     try:
         ticket = await _service_desk_store.create_ticket(
             **values,
+            initial_caller_number=initial_caller_number,
             intake_call_id=str(args.get("_call_connection_id") or "").strip() or None,
             intake_session_id=str(args.get("_session_id") or "").strip() or None,
         )

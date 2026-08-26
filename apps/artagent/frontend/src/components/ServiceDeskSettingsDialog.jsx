@@ -21,6 +21,8 @@ import { API_BASE_URL } from '../config/constants.js';
 
 const CONFIGURATION_URL = `${API_BASE_URL}/api/v1/service-desk/configuration`;
 const E164_PATTERN = /^\+[1-9]\d{1,14}$/;
+const INITIAL_CALLER_TARGET = '%initial_caller%';
+const MAX_CALLBACK_TARGETS = 10;
 
 const parseRetryIntervals = (value) => {
   const parts = value.split(';').map((part) => part.trim());
@@ -41,12 +43,38 @@ const parseRetryIntervals = (value) => {
   return intervals;
 };
 
-const validateServices = (services) => {
+const parseCallbackTargets = (value, serviceName) => {
+  const parts = value.split(';').map((part) => part.trim());
+  if (parts.some((part) => !part)) {
+    throw new Error(`Enter callback targets for ${serviceName} without empty values.`);
+  }
+  if (parts.length > MAX_CALLBACK_TARGETS) {
+    throw new Error(`At most ${MAX_CALLBACK_TARGETS} callback targets are allowed per service.`);
+  }
+
+  const seen = new Set();
+  const targets = [];
+  parts.forEach((part) => {
+    const target = part.toLocaleLowerCase() === INITIAL_CALLER_TARGET ? INITIAL_CALLER_TARGET : part;
+    if (target !== INITIAL_CALLER_TARGET && !E164_PATTERN.test(target)) {
+      throw new Error(
+        `Enter E.164 numbers or ${INITIAL_CALLER_TARGET} for ${serviceName}.`,
+      );
+    }
+    if (!seen.has(target)) {
+      seen.add(target);
+      targets.push(target);
+    }
+  });
+  return targets;
+};
+
+const normalizeServices = (services) => {
   if (!services.length) {
     throw new Error('At least one service route is required.');
   }
   const names = new Set();
-  services.forEach((service) => {
+  return services.map((service) => {
     const name = service.name.trim();
     if (!name) {
       throw new Error('Every service route requires a name.');
@@ -56,9 +84,11 @@ const validateServices = (services) => {
       throw new Error(`Service names must be unique: ${name}.`);
     }
     names.add(nameKey);
-    if (!E164_PATTERN.test(service.phone_number.trim())) {
-      throw new Error(`Enter an E.164 phone number for ${name}, for example +15551234567.`);
-    }
+    return {
+      service_id: service.service_id,
+      name,
+      phone_numbers: parseCallbackTargets(service.phone_numbers, name),
+    };
   });
 };
 
@@ -74,7 +104,12 @@ const ServiceDeskSettingsDialog = memo(function ServiceDeskSettingsDialog({ open
   const applyConfiguration = useCallback((value) => {
     setConfiguration(value);
     setRetryText(value.retry_intervals_minutes.join(';'));
-    setServices(value.services.map((service) => ({ ...service })));
+    setServices(
+      value.services.map((service) => ({
+        ...service,
+        phone_numbers: (service.phone_numbers || [service.phone_number]).join(';'),
+      })),
+    );
   }, []);
 
   const loadConfiguration = useCallback(async ({ conflict = false } = {}) => {
@@ -116,7 +151,7 @@ const ServiceDeskSettingsDialog = memo(function ServiceDeskSettingsDialog({ open
   const handleAddService = useCallback(() => {
     setServices((current) => [
       ...current,
-      { service_id: null, name: '', phone_number: '' },
+      { service_id: null, name: '', phone_numbers: '' },
     ]);
     setSuccess('');
   }, []);
@@ -132,9 +167,10 @@ const ServiceDeskSettingsDialog = memo(function ServiceDeskSettingsDialog({ open
     setSuccess('');
 
     let retryIntervals;
+    let normalizedServices;
     try {
       retryIntervals = parseRetryIntervals(retryText);
-      validateServices(services);
+      normalizedServices = normalizeServices(services);
     } catch (validationError) {
       setError(validationError.message);
       return;
@@ -148,11 +184,7 @@ const ServiceDeskSettingsDialog = memo(function ServiceDeskSettingsDialog({ open
         body: JSON.stringify({
           expected_revision: configuration.revision,
           retry_intervals_minutes: retryIntervals,
-          services: services.map(({ service_id, name, phone_number }) => ({
-            service_id,
-            name: name.trim(),
-            phone_number: phone_number.trim(),
-          })),
+          services: normalizedServices,
         }),
       });
       if (response.status === 409) {
@@ -260,15 +292,16 @@ const ServiceDeskSettingsDialog = memo(function ServiceDeskSettingsDialog({ open
                     inputProps={{ 'aria-label': `Service name ${index + 1}` }}
                   />
                   <TextField
-                    label="Call number"
-                    value={service.phone_number}
+                    label="Call targets"
+                    value={service.phone_numbers}
                     onChange={(event) =>
-                      handleServiceChange(index, 'phone_number', event.target.value)
+                      handleServiceChange(index, 'phone_numbers', event.target.value)
                     }
                     disabled={isBusy}
                     fullWidth
-                    placeholder="+15551234567"
-                    inputProps={{ 'aria-label': `Service call number ${index + 1}` }}
+                    placeholder={`+15551234567;${INITIAL_CALLER_TARGET}`}
+                    helperText="Called in order; separate targets with semicolons."
+                    inputProps={{ 'aria-label': `Service call targets ${index + 1}` }}
                   />
                   <IconButton
                     aria-label={`Remove ${service.name || `service ${index + 1}`}`}

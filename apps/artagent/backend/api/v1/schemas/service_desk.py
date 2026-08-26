@@ -33,6 +33,9 @@ class AttemptHistoryEntry(BaseModel):
     started_at: datetime | None = None
     ended_at: datetime | None = None
     reason: str | None = None
+    round_number: int | None = None
+    target_index: int | None = None
+    target_number: str | None = None
 
     model_config = ConfigDict(extra="ignore")
 
@@ -44,6 +47,7 @@ class ServiceDeskTicket(BaseModel):
     work_item_id: str
     name: str
     callback_number: str
+    initial_caller_number: str | None = None
     urgency: str
     service_id: str | None = None
     affected_service: str
@@ -66,10 +70,17 @@ class ServiceDeskWorkItem(BaseModel):
     work_item_id: str
     ticket_id: str
     callback_number: str
+    initial_caller_number: str | None = None
     service_id: str | None = None
     standby_number: str
+    standby_numbers: list[str] = Field(default_factory=list)
     status: str
     attempt_count: int
+    completed_round_count: int = 0
+    round_number: int | None = None
+    current_target_index: int = 0
+    current_target_number: str | None = None
+    round_targets: list[str] = Field(default_factory=list)
     retry_interval_seconds: int
     next_attempt_at: datetime | None = None
     expires_at: datetime
@@ -128,7 +139,7 @@ class ServiceDeskServiceRoute(BaseModel):
 
     service_id: str
     name: str
-    phone_number: str
+    phone_numbers: list[str]
 
 
 class ServiceDeskServiceRouteUpdate(BaseModel):
@@ -136,7 +147,7 @@ class ServiceDeskServiceRouteUpdate(BaseModel):
 
     service_id: str | None = None
     name: str
-    phone_number: str
+    phone_numbers: list[str] = Field(min_length=1, max_length=10)
 
 
 class ServiceDeskConfigurationResponse(BaseModel):

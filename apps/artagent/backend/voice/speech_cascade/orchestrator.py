@@ -2048,6 +2048,9 @@ class CascadeOrchestratorAdapter:
                                         client_id = cm.get_value_from_corememory("client_id")
                                         if client_id:
                                             args["_client_id"] = client_id
+                                        caller_id = cm.get_value_from_corememory("caller_id")
+                                        if caller_id:
+                                            args["_initial_caller"] = caller_id
                                     args["_call_connection_id"] = (
                                         self.config.call_connection_id or ""
                                     )

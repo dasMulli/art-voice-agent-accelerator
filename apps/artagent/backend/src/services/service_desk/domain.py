@@ -8,6 +8,7 @@ from typing import Any, Final
 from uuid import uuid4
 
 _E164_PATTERN: Final = re.compile(r"^\+[1-9]\d{1,14}$")
+INITIAL_CALLER_TARGET: Final = "%initial_caller%"
 
 
 class Urgency(StrEnum):
@@ -34,6 +35,7 @@ AFFECTED_SERVICES: Final[dict[str, str]] = DEFAULT_AFFECTED_SERVICES
 DEFAULT_RETRY_INTERVALS_MINUTES: Final[tuple[int, ...]] = (10,)
 MAX_RETRY_INTERVALS: Final = 20
 MAX_RETRY_INTERVAL_MINUTES: Final = 1440
+MAX_CALLBACK_TARGETS: Final = 10
 
 
 def normalize_e164(value: str) -> str:
@@ -68,7 +70,7 @@ def default_service_routes() -> list[dict[str, Any]]:
         {
             "service_id": label,
             "name": label,
-            "phone_number": phone_number,
+            "phone_numbers": [phone_number],
             "enabled": True,
         }
         for label, phone_number in DEFAULT_AFFECTED_SERVICES.items()
@@ -92,6 +94,55 @@ def validate_retry_intervals(values: list[int] | tuple[int, ...]) -> list[int]:
             )
         normalized.append(value)
     return normalized
+
+
+def validate_callback_targets(values: list[str] | tuple[str, ...]) -> list[str]:
+    """Validate and normalize an ordered service callback target list."""
+    if not values:
+        raise ValueError("At least one callback target is required.")
+    if len(values) > MAX_CALLBACK_TARGETS:
+        raise ValueError(f"At most {MAX_CALLBACK_TARGETS} callback targets are allowed.")
+
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        candidate = str(value or "").strip()
+        if not candidate:
+            raise ValueError("Callback targets cannot be empty.")
+        target = (
+            INITIAL_CALLER_TARGET
+            if candidate.casefold() == INITIAL_CALLER_TARGET
+            else normalize_e164(candidate)
+        )
+        if target in seen:
+            continue
+        seen.add(target)
+        normalized.append(target)
+    return normalized
+
+
+def resolve_callback_targets(
+    values: list[str] | tuple[str, ...],
+    *,
+    initial_caller_number: str | None,
+) -> list[str]:
+    """Resolve placeholders and de-duplicate concrete callback numbers."""
+    initial_caller: str | None = None
+    if initial_caller_number:
+        try:
+            initial_caller = normalize_e164(initial_caller_number)
+        except ValueError:
+            initial_caller = None
+
+    resolved: list[str] = []
+    seen: set[str] = set()
+    for target in validate_callback_targets(values):
+        concrete = initial_caller if target == INITIAL_CALLER_TARGET else target
+        if concrete is None or concrete in seen:
+            continue
+        seen.add(concrete)
+        resolved.append(concrete)
+    return resolved
 
 
 def validate_service_routes(
@@ -127,11 +178,17 @@ def validate_service_routes(
             raise ValueError(f"Duplicate service ID: {service_id}.")
         seen_ids.add(service_id)
 
+        raw_targets = route.get("phone_numbers")
+        if raw_targets is None:
+            raw_targets = [route.get("phone_number")]
+        if not isinstance(raw_targets, (list, tuple)):
+            raise ValueError("Service callback targets must be a list.")
+
         normalized.append(
             {
                 "service_id": service_id,
                 "name": name,
-                "phone_number": normalize_e164(str(route.get("phone_number") or "")),
+                "phone_numbers": validate_callback_targets(raw_targets),
                 "enabled": True,
             }
         )

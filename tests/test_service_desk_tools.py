@@ -82,6 +82,7 @@ async def test_create_ticket_returns_success_and_message():
             "affected_service": service,
             "description": "Cannot send messages.",
             "short_description": "Email send failure",
+            "_initial_caller": "+1 (425) 555-0199",
         }
     )
 
@@ -108,6 +109,7 @@ async def test_create_ticket_returns_success_and_message():
         affected_service=service,
         description="Cannot send messages.",
         short_description="Email send failure",
+        initial_caller_number="+14255550199",
         intake_call_id=None,
         intake_session_id=None,
     )

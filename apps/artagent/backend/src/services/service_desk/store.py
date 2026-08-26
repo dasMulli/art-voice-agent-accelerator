@@ -12,6 +12,7 @@ from apps.artagent.backend.src.services.service_desk.domain import (
     Urgency,
     default_service_routes,
     normalize_e164,
+    validate_callback_targets,
     validate_retry_intervals,
     validate_service_routes,
 )
@@ -82,6 +83,7 @@ class ServiceDeskStore:
         )
         if not isinstance(configuration, dict):
             raise RuntimeError("Service desk configuration could not be initialized.")
+        configuration = await self._migrate_configuration_routes(configuration)
         await self._migrate_active_service_ids(configuration)
         return self._public_configuration(configuration)
 
@@ -99,6 +101,7 @@ class ServiceDeskStore:
             )
         if not isinstance(configuration, dict):
             raise RuntimeError("Service desk configuration is unavailable.")
+        configuration = await self._migrate_configuration_routes(configuration)
         return self._public_configuration(configuration, include_disabled=include_disabled)
 
     async def update_configuration(
@@ -213,7 +216,11 @@ class ServiceDeskStore:
         standby_number = str(work_item.get("standby_number") or "").strip()
         if standby_number:
             route = next(
-                (service for service in services if service["phone_number"] == standby_number),
+                (
+                    service
+                    for service in services
+                    if standby_number in service.get("phone_numbers", [])
+                ),
                 None,
             )
             if route is not None:
@@ -250,6 +257,63 @@ class ServiceDeskStore:
             "updated_at": configuration["updated_at"],
         }
 
+    async def _migrate_configuration_routes(
+        self,
+        configuration: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Persist legacy singleton route numbers as ordered target lists."""
+        migrated_services: list[dict[str, Any]] = []
+        changed = False
+        for service in configuration.get("services", []):
+            raw_targets = service.get("phone_numbers")
+            if raw_targets is None:
+                raw_targets = [service.get("phone_number")]
+                changed = True
+            if not isinstance(raw_targets, (list, tuple)):
+                raise RuntimeError("Stored service callback targets must be a list.")
+            normalized_targets = validate_callback_targets(raw_targets)
+            migrated = {key: value for key, value in service.items() if key != "phone_number"}
+            migrated["phone_numbers"] = normalized_targets
+            if migrated != service:
+                changed = True
+            migrated_services.append(migrated)
+
+        if not changed:
+            return configuration
+
+        now = _utc_now()
+        updated = await asyncio.to_thread(
+            self._collection.find_one_and_update,
+            {
+                "_id": CONFIG_DOCUMENT_ID,
+                "document_type": CONFIG_DOCUMENT_TYPE,
+                "revision": configuration["revision"],
+            },
+            {
+                "$set": {
+                    "services": migrated_services,
+                    "updated_at": now,
+                },
+                "$inc": {"revision": 1},
+            },
+            return_document=ReturnDocument.AFTER,
+        )
+        if isinstance(updated, dict):
+            return updated
+
+        current = await asyncio.to_thread(
+            self._collection.find_one,
+            {"_id": CONFIG_DOCUMENT_ID, "document_type": CONFIG_DOCUMENT_TYPE},
+        )
+        if not isinstance(current, dict):
+            raise RuntimeError("Service desk configuration migration failed.")
+        if all(
+            isinstance(service.get("phone_numbers"), list) and "phone_number" not in service
+            for service in current.get("services", [])
+        ):
+            return current
+        raise RuntimeError("Service desk configuration changed during route migration.")
+
     async def _migrate_active_service_ids(self, configuration: dict[str, Any]) -> None:
         """Attach stable IDs to legacy active work and ticket snapshots."""
         for service in configuration.get("services", []):
@@ -262,7 +326,7 @@ class ServiceDeskStore:
                     "document_type": WORK_ITEM_DOCUMENT_TYPE,
                     "status": {"$in": _ACTIVE_WORK_STATUSES},
                     "service_id": {"$exists": False},
-                    "standby_number": service["phone_number"],
+                    "standby_number": {"$in": service["phone_numbers"]},
                 },
                 {"$set": {"service_id": service_id}},
             )
@@ -285,6 +349,7 @@ class ServiceDeskStore:
         description: str,
         short_description: str,
         *,
+        initial_caller_number: str | None = None,
         intake_call_id: str | None = None,
         intake_session_id: str | None = None,
     ) -> dict[str, Any]:
@@ -306,7 +371,14 @@ class ServiceDeskStore:
             raise ValueError(f"Unsupported affected service: {affected_service}")
         service_id = str(service_route["service_id"])
         service_label = str(service_route["name"])
-        standby_number = str(service_route["phone_number"])
+        standby_numbers = list(service_route["phone_numbers"])
+        standby_number = str(standby_numbers[0])
+        normalized_initial_caller: str | None = None
+        if initial_caller_number:
+            try:
+                normalized_initial_caller = normalize_e164(initial_caller_number)
+            except ValueError:
+                normalized_initial_caller = None
         initial_retry_seconds = int(configuration["retry_intervals_minutes"][0]) * 60
         required = {
             "name": name,
@@ -327,6 +399,7 @@ class ServiceDeskStore:
             "work_item_id": work_item_id,
             "name": name.strip(),
             "callback_number": normalized_callback,
+            "initial_caller_number": normalized_initial_caller,
             "urgency": normalized_urgency,
             "service_id": service_id,
             "affected_service": service_label,
@@ -344,10 +417,15 @@ class ServiceDeskStore:
             "work_item_id": work_item_id,
             "ticket_id": ticket_id,
             "callback_number": normalized_callback,
+            "initial_caller_number": normalized_initial_caller,
             "service_id": service_id,
             "standby_number": standby_number,
+            "standby_numbers": standby_numbers,
             "status": "awaiting_intake_disconnect" if waits_for_disconnect else "pending",
             "attempt_count": 0,
+            "completed_round_count": 0,
+            "current_target_index": 0,
+            "round_targets": [],
             "attempt_history": [],
             "retry_interval_seconds": initial_retry_seconds,
             "next_attempt_at": None if waits_for_disconnect else now,
@@ -676,9 +754,7 @@ class ServiceDeskStore:
         }
         if "lease_owner" in previous_work_item:
             restored_fields["lease_owner"] = previous_work_item["lease_owner"]
-            restored_fields["lease_until"] = _utc_now() + timedelta(
-                seconds=WORK_ITEM_LEASE_SECONDS
-            )
+            restored_fields["lease_until"] = _utc_now() + timedelta(seconds=WORK_ITEM_LEASE_SECONDS)
 
         result = await asyncio.to_thread(
             self._collection.update_one,
@@ -701,9 +777,7 @@ class ServiceDeskStore:
             array_filters=[{"attempt.call_id": call_id}],
         )
         if not result.modified_count:
-            raise RuntimeError(
-                "Failed to restore callback work after the ticket update failed."
-            )
+            raise RuntimeError("Failed to restore callback work after the ticket update failed.")
 
     async def claim_due_work(
         self,
@@ -761,6 +835,9 @@ class ServiceDeskStore:
         call_id: str,
         *,
         attempt_number: int = 1,
+        round_number: int | None = None,
+        target_index: int | None = None,
+        target_number: str | None = None,
         now: datetime | None = None,
     ) -> dict[str, Any] | None:
         """Mark a leased item as calling and associate its outbound call."""
@@ -769,6 +846,19 @@ class ServiceDeskStore:
         if attempt_number <= 0:
             raise ValueError("attempt_number must be positive.")
         current_time = now or _utc_now()
+        history_entry: dict[str, Any] = {
+            "attempt_number": attempt_number,
+            "call_id": call_id,
+            "status": "calling",
+            "started_at": current_time,
+        }
+        if round_number is not None:
+            history_entry["round_number"] = round_number
+        if target_index is not None:
+            history_entry["target_index"] = target_index
+        if target_number is not None:
+            history_entry["target_number"] = normalize_e164(target_number)
+
         return await asyncio.to_thread(
             self._collection.find_one_and_update,
             {
@@ -786,15 +876,82 @@ class ServiceDeskStore:
                     "updated_at": current_time,
                 },
                 "$inc": {"attempt_count": 1},
-                "$push": {
-                    "attempt_history": {
-                        "attempt_number": attempt_number,
-                        "call_id": call_id,
-                        "status": "calling",
-                        "started_at": current_time,
+                "$push": {"attempt_history": history_entry},
+            },
+            return_document=ReturnDocument.AFTER,
+        )
+
+    async def prepare_round_targets(
+        self,
+        work_item_id: str,
+        worker_id: str,
+        targets: list[str],
+        *,
+        now: datetime | None = None,
+    ) -> dict[str, Any] | None:
+        """Persist a stable concrete target snapshot for the claimed retry round."""
+        normalized_targets: list[str] = []
+        seen: set[str] = set()
+        for target in targets:
+            normalized = normalize_e164(target)
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            normalized_targets.append(normalized)
+
+        current_time = now or _utc_now()
+        query = {
+            "document_type": WORK_ITEM_DOCUMENT_TYPE,
+            "work_item_id": work_item_id,
+            "status": "claimed",
+            "lease_owner": worker_id,
+            "lease_until": {"$gt": current_time},
+        }
+        current = await asyncio.to_thread(self._collection.find_one, query)
+        if current is None:
+            return None
+
+        existing_targets = list(current.get("round_targets") or [])
+        if existing_targets:
+            target_index = min(
+                max(int(current.get("current_target_index", 0)), 0),
+                len(existing_targets) - 1,
+            )
+            target_number = existing_targets[target_index]
+            if (
+                current.get("current_target_index") == target_index
+                and current.get("current_target_number") == target_number
+            ):
+                return current
+            return await asyncio.to_thread(
+                self._collection.find_one_and_update,
+                query,
+                {
+                    "$set": {
+                        "current_target_index": target_index,
+                        "current_target_number": target_number,
+                        "updated_at": current_time,
                     }
                 },
-            },
+                return_document=ReturnDocument.AFTER,
+            )
+
+        completed_round_count = int(
+            current.get("completed_round_count", current.get("attempt_count", 0))
+        )
+        round_number = completed_round_count + 1
+        update_fields: dict[str, Any] = {
+            "completed_round_count": completed_round_count,
+            "round_number": round_number,
+            "round_targets": normalized_targets,
+            "current_target_index": 0,
+            "current_target_number": normalized_targets[0] if normalized_targets else None,
+            "updated_at": current_time,
+        }
+        return await asyncio.to_thread(
+            self._collection.find_one_and_update,
+            query,
+            {"$set": update_fields},
             return_document=ReturnDocument.AFTER,
         )
 
@@ -827,20 +984,47 @@ class ServiceDeskStore:
             return None
         configuration = await self.get_configuration()
         retry_intervals = configuration["retry_intervals_minutes"]
+        round_targets = list(current_work_item.get("round_targets") or [])
+        target_index = max(int(current_work_item.get("current_target_index", 0)), 0)
+        has_next_target = target_index + 1 < len(round_targets)
         attempt_count = int(current_work_item.get("attempt_count", 0))
-        interval_index = min(max(attempt_count - 1, 0), len(retry_intervals) - 1)
-        retry_interval_seconds = int(retry_intervals[interval_index]) * 60
+        legacy_completed_rounds = max(attempt_count - (1 if call_id else 0), 0)
+        completed_round_count = int(
+            current_work_item.get("completed_round_count", legacy_completed_rounds)
+        )
+        retry_interval_seconds = 0
+        next_attempt_at = current_time
+        if not has_next_target:
+            interval_index = min(completed_round_count, len(retry_intervals) - 1)
+            retry_interval_seconds = int(retry_intervals[interval_index]) * 60
+            next_attempt_at = current_time + timedelta(seconds=retry_interval_seconds)
+
         update: dict[str, Any] = {
             "$set": {
                 "status": "retry",
                 "retry_interval_seconds": retry_interval_seconds,
-                "next_attempt_at": current_time + timedelta(seconds=retry_interval_seconds),
+                "next_attempt_at": next_attempt_at,
                 "last_release_reason": cleaned_reason,
                 "released_at": current_time,
                 "updated_at": current_time,
             },
             "$unset": {"lease_owner": "", "lease_until": ""},
         }
+        if has_next_target:
+            update["$set"].update(
+                {
+                    "current_target_index": target_index + 1,
+                    "current_target_number": round_targets[target_index + 1],
+                }
+            )
+        else:
+            update["$set"].update(
+                {
+                    "completed_round_count": completed_round_count + 1,
+                    "current_target_index": 0,
+                }
+            )
+            update["$unset"].update({"round_targets": "", "current_target_number": ""})
         kwargs: dict[str, Any] = {"return_document": ReturnDocument.AFTER}
         if call_id:
             update["$set"].update(

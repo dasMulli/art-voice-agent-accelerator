@@ -75,7 +75,7 @@ class FakeServiceDeskStore:
                 {
                     "service_id": "email",
                     "name": "Email",
-                    "phone_number": "+14255550201",
+                    "phone_numbers": ["+14255550201"],
                 }
             ],
             "created_at": NOW,
@@ -238,6 +238,9 @@ def test_get_ticket_derives_latest_attempt_from_store_fields() -> None:
             "started_at": "2026-08-17T03:00:00Z",
             "ended_at": "2026-08-17T03:00:05Z",
             "reason": "call disconnected",
+            "round_number": None,
+            "target_index": None,
+            "target_number": None,
         }
     ]
 
@@ -263,7 +266,7 @@ def test_configuration_can_be_read_and_updated() -> None:
                 {
                     "service_id": "email",
                     "name": "Messaging",
-                    "phone_number": "+14255550999",
+                    "phone_numbers": ["+14255550999", "%initial_caller%"],
                 }
             ],
         },
@@ -289,7 +292,7 @@ def test_configuration_update_returns_conflict_for_stale_revision() -> None:
                 {
                     "service_id": "email",
                     "name": "Email",
-                    "phone_number": "+14255550201",
+                    "phone_numbers": ["+14255550201"],
                 }
             ],
         },
@@ -314,7 +317,7 @@ def test_configuration_update_rejects_non_integer_retry_values() -> None:
                 {
                     "service_id": "email",
                     "name": "Email",
-                    "phone_number": "+14255550201",
+                    "phone_numbers": ["+14255550201"],
                 }
             ],
         },
@@ -336,7 +339,7 @@ def test_configuration_update_returns_in_use_conflict_without_revision_code() ->
                 {
                     "service_id": "email",
                     "name": "Email",
-                    "phone_number": "+14255550201",
+                    "phone_numbers": ["+14255550201"],
                 }
             ],
         },

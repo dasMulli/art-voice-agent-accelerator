@@ -17,6 +17,9 @@ from apps.artagent.backend.src.orchestration.session_agents import (
     persist_session_agents_to_redis,
     set_session_agent,
 )
+from apps.artagent.backend.src.services.service_desk.domain import (
+    resolve_callback_targets,
+)
 from apps.artagent.backend.src.services.service_desk.store import (
     WORK_ITEM_EXPIRY_HOURS,
     WORK_ITEM_LEASE_SECONDS,
@@ -152,6 +155,30 @@ class ServiceDeskDispatcher:
             )
             return False
 
+        initial_caller_number = str(
+            work_item.get("initial_caller_number") or ticket.get("initial_caller_number") or ""
+        ).strip()
+        resolved_targets = resolve_callback_targets(
+            route["phone_numbers"],
+            initial_caller_number=initial_caller_number or None,
+        )
+        prepared = await self._store.prepare_round_targets(
+            work_item_id,
+            self._worker_id,
+            resolved_targets,
+        )
+        if prepared is None:
+            return False
+        work_item = prepared
+        target_number = str(work_item.get("current_target_number") or "").strip()
+        if not target_number:
+            await self._store.release_after_failure(
+                work_item_id,
+                self._worker_id,
+                "no callback targets resolved for this round",
+            )
+            return False
+
         ticket = {
             **ticket,
             "service_id": route["service_id"],
@@ -160,7 +187,8 @@ class ServiceDeskDispatcher:
         work_item = {
             **work_item,
             "service_id": route["service_id"],
-            "standby_number": route["phone_number"],
+            "standby_number": target_number,
+            "standby_numbers": list(work_item.get("round_targets") or resolved_targets),
         }
 
         session_id = (
@@ -173,7 +201,7 @@ class ServiceDeskDispatcher:
         try:
             result = await self._lifecycle_handler.start_outbound_call(
                 acs_caller=self._acs_caller,
-                target_number=str(route["phone_number"]),
+                target_number=target_number,
                 redis_mgr=self._redis,
                 browser_session_id=session_id,
             )
@@ -206,6 +234,9 @@ class ServiceDeskDispatcher:
                 self._worker_id,
                 call_id,
                 attempt_number=int(work_item.get("attempt_count", 0)) + 1,
+                round_number=int(work_item.get("round_number", 1)),
+                target_index=int(work_item.get("current_target_index", 0)),
+                target_number=target_number,
             )
         except Exception:
             logger.exception(
