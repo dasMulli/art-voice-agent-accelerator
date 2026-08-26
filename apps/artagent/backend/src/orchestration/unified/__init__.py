@@ -44,6 +44,10 @@ from apps.artagent.backend.src.utils.tracing import (
     create_service_handler_attrs,
 )
 from apps.artagent.backend.voice.shared.config_resolver import resolve_orchestrator_config
+from apps.artagent.backend.voice.shared.terminal_action import (
+    TerminalAction,
+    terminal_action_from_result,
+)
 from src.stateful.state_managment import MemoManager
 from apps.artagent.backend.voice import (
     CascadeOrchestratorAdapter,
@@ -494,6 +498,7 @@ async def route_turn(
             )
 
             tool_invocations: dict[str, dict[str, float]] = {}
+            terminal_action: TerminalAction | None = None
 
             # Define agent switch callback - emits agent_change envelope for UI cascade updates
             async def on_agent_switch(previous_agent: str, new_agent: str) -> None:
@@ -678,9 +683,16 @@ async def route_turn(
                     logger.debug("Failed to emit tool_start frame", exc_info=True)
 
             async def on_tool_end(tool_name: str, result: object) -> None:
+                nonlocal terminal_action
                 if not tool_name:
                     return
                 try:
+                    parsed_action = terminal_action_from_result(result)
+                    if parsed_action is not None and terminal_action is None:
+                        terminal_action = parsed_action
+                        handler = getattr(ws.state, "speech_cascade", None)
+                        if handler is not None:
+                            handler.begin_terminal_response(parsed_action)
                     info = tool_invocations.pop(tool_name, None)
                     call_id = info.get("id") if info else uuid.uuid4().hex[:10]
                     duration_ms = None
@@ -822,6 +834,16 @@ async def route_turn(
                 logger.debug("Failed to emit orchestrator error status", exc_info=True)
             raise
         finally:
+            if terminal_action is not None:
+                handler = getattr(ws.state, "speech_cascade", None)
+                if handler is not None:
+                    try:
+                        await handler.finish_terminal_response(terminal_action)
+                    except Exception:
+                        logger.exception(
+                            "Failed to terminate Cascade session after terminal tool result"
+                        )
+
             # Persist conversation state
             try:
                 if hasattr(cm, "persist_to_redis_async"):

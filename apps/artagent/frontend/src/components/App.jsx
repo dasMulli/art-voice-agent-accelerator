@@ -13,6 +13,7 @@ import BoltRoundedIcon from '@mui/icons-material/BoltRounded';
 import SpeedRoundedIcon from '@mui/icons-material/SpeedRounded';
 import BuildRoundedIcon from '@mui/icons-material/BuildRounded';
 import TuneRoundedIcon from '@mui/icons-material/TuneRounded';
+import SettingsRoundedIcon from '@mui/icons-material/SettingsRounded';
 import TemporaryUserForm from './TemporaryUserForm';
 import { AcsStreamingModeSelector, RealtimeStreamingModeSelector } from './StreamingModeSelector.jsx';
 import ProfileButton from './ProfileButton.jsx';
@@ -52,6 +53,7 @@ import {
 import logger from '../utils/logger.js';
 import { fetchFoundryModels, deriveModelOptions, MANAGED_VOICELIVE_MODELS } from '../utils/foundryModels.js';
 import { OrchestrationDiagramModal } from './OrchestrationDiagram.jsx';
+import ServiceDeskSettingsDialog from './ServiceDeskSettingsDialog.jsx';
 
 const STREAM_MODE_STORAGE_KEY = 'artagent.streamingMode';
 const STREAM_MODE_FALLBACK = 'voice_live';
@@ -1229,6 +1231,7 @@ showScenarioConfirmation(scenarioName, currentAgentRef.current);
   const closeDemoForm = useCallback(() => setShowDemoForm(false), [setShowDemoForm]);
   const [showAgentBuilder, setShowAgentBuilder] = useState(false);
   const [showAgentScenarioBuilder, setShowAgentScenarioBuilder] = useState(false);
+  const [showServiceDeskSettings, setShowServiceDeskSettings] = useState(false);
   // When set, the builder deep-links into editing this live/session agent.
   const [liveEditAgentName, setLiveEditAgentName] = useState(null);
   // Live session-settings ("Quick Tune") popover — explore/edit/prototype model,
@@ -4928,6 +4931,35 @@ showScenarioConfirmation(scenarioName, currentAgentRef.current);
                   </>
                 )}
 
+                {activeScenarioKey === 'service_desk' && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowServiceDeskSettings(true);
+                      setShowScenarioMenu(false);
+                    }}
+                    style={{
+                      width: '100%',
+                      marginTop: '10px',
+                      padding: '10px 14px',
+                      borderRadius: '10px',
+                      border: '1px solid rgba(14,165,233,0.25)',
+                      background: 'rgba(14,165,233,0.08)',
+                      color: '#0369a1',
+                      fontSize: '12px',
+                      fontWeight: 600,
+                      cursor: 'pointer',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '10px',
+                      textAlign: 'left',
+                    }}
+                  >
+                    <SettingsRoundedIcon sx={{ fontSize: 17 }} />
+                    <span>Configure Service Desk…</span>
+                  </button>
+                )}
+
                 <button
                   type="button"
                   onClick={() => {
@@ -6042,6 +6074,10 @@ showScenarioConfirmation(scenarioName, currentAgentRef.current);
           open={showOrchestrationDiagram}
           onClose={() => setShowOrchestrationDiagram(false)}
           initialMode={liveSettingsMode}
+        />
+        <ServiceDeskSettingsDialog
+          open={showServiceDeskSettings}
+          onClose={() => setShowServiceDeskSettings(false)}
         />
         {showDemoForm && typeof document !== 'undefined' &&
           createPortal(

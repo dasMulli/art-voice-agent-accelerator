@@ -24,6 +24,10 @@ Usage:
         TRANSFER_TOOL_NAMES,
         CALL_CENTER_TRIGGER_PHRASES,
     )
+    from apps.artagent.backend.voice.shared.terminal_action import (
+        TerminalAction,
+        terminal_action_from_result,
+    )
 
     orchestrator = LiveOrchestrator(
         conn=voicelive_connection,
@@ -54,6 +58,10 @@ from apps.artagent.backend.voice.shared.metrics import OrchestratorMetrics
 from apps.artagent.backend.voice.shared.session_state import (
     sync_state_from_memo,
     sync_state_to_memo,
+)
+from apps.artagent.backend.voice.shared.terminal_action import (
+    TerminalAction,
+    terminal_action_from_result,
 )
 from azure.ai.voicelive.models import (
     AssistantMessageItem,
@@ -280,6 +288,7 @@ class LiveOrchestrator:
         # When model makes multiple tool calls, we queue results and trigger ONE response
         self._pending_tool_outputs: list[tuple[str, str]] = []  # [(call_id, output_json), ...]
         self._response_had_tool_calls: bool = False
+        self._pending_terminal_action: TerminalAction | None = None
 
         # MemoManager for session state continuity (consistent with CascadeOrchestratorAdapter)
         self._memo_manager: MemoManager | None = memo_manager
@@ -1450,6 +1459,11 @@ class LiveOrchestrator:
                 ),
             ):
                 await self.conn.response.create()
+            if self._pending_terminal_action is not None and self.messenger:
+                await self.messenger.mark_terminal_response_started(
+                    self._pending_terminal_action
+                )
+                self._pending_terminal_action = None
             logger.info("[Response Done] Triggered single response for batched tool outputs")
 
         # Reset the tool calls flag
@@ -1744,6 +1758,8 @@ class LiveOrchestrator:
                 client_id = self._memo_manager.get_value_from_corememory("client_id")
                 if client_id:
                     args["_client_id"] = client_id
+            args["_call_connection_id"] = self.call_connection_id or ""
+            args["_session_id"] = session_id or ""
 
             logger.info("Executing tool: %s with args: %s", name, args)
 
@@ -1912,6 +1928,12 @@ class LiveOrchestrator:
                         )
                 except Exception:
                     logger.debug("Failed to persist tool results to MemoManager", exc_info=True)
+
+            terminal_action = terminal_action_from_result(result)
+            if terminal_action is not None and self._pending_terminal_action is None:
+                self._pending_terminal_action = terminal_action
+                if self.messenger:
+                    await self.messenger.prepare_terminal_response(terminal_action)
 
             # Handle transfer tools
             if (
@@ -2576,4 +2598,3 @@ __all__ = [
     "get_voicelive_orchestrator",
     "get_orchestrator_registry_size",
 ]
-

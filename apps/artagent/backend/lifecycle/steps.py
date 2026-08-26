@@ -465,7 +465,8 @@ def register_service_desk_dispatcher_step(
 
     async def start() -> None:
         try:
-            store = ServiceDeskStore(app.state.cosmos)
+            store = ServiceDeskStore(app.state.cosmos, app.state.redis)
+            await store.ensure_configuration()
         except ValueError as exc:
             configure_service_desk_store(None)
             app.state.service_desk_store = None

@@ -263,6 +263,7 @@ async def terminate_session(
     reason: TerminationReason = TerminationReason.NORMAL,
     acs_client: CallAutomationClient | None = None,
     wait_for_disconnect_s: float = 5.0,  # Reduced from 10s
+    play_goodbye: bool = True,
 ) -> TerminationResult:
     """
     Best-effort shutdown of ACS call and WebSocket with proper resource cleanup.
@@ -277,6 +278,7 @@ async def terminate_session(
     :param acs_client: Optional explicit CallAutomationClient. If not provided,
                        the function attempts to read `ws.app.state.acs_caller.client`.
     :param wait_for_disconnect_s: Max seconds to wait for ACS to disconnect before closing WS.
+    :param play_goodbye: Whether to use the legacy terminator-owned goodbye before hang-up.
     :return: TerminationResult indicating what succeeded.
     """
     logger.info(
@@ -314,7 +316,7 @@ async def terminate_session(
         acs_attempted = True
         try:
             try:
-                if hasattr(ws.state, "handler") and ws.state.handler:
+                if play_goodbye and hasattr(ws.state, "handler") and ws.state.handler:
                     goodbye_message = _get_goodbye_message(reason)
                     if goodbye_message:
                         ws.state.handler.play_greeting(greeting_text=goodbye_message)

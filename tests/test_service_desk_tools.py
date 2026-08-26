@@ -16,6 +16,7 @@ def reset_store():
 def test_service_desk_tool_schemas_are_openai_compatible():
     for schema in (
         service_desk.LOOKUP_KNOWN_CALLER_SCHEMA,
+        service_desk.LIST_SERVICE_DESK_SERVICES_SCHEMA,
         service_desk.CREATE_SERVICE_DESK_TICKET_SCHEMA,
         service_desk.RECORD_SERVICE_DESK_CONFIRMATION_SCHEMA,
     ):
@@ -26,6 +27,10 @@ def test_service_desk_tool_schemas_are_openai_compatible():
 
     urgency = service_desk.CREATE_SERVICE_DESK_TICKET_SCHEMA["parameters"]["properties"]["urgency"]
     assert urgency["enum"] == ["low", "medium", "high", "critical"]
+    affected_service = service_desk.CREATE_SERVICE_DESK_TICKET_SCHEMA["parameters"]["properties"][
+        "affected_service"
+    ]
+    assert "enum" not in affected_service
 
 
 @pytest.mark.asyncio
@@ -67,7 +72,7 @@ async def test_create_ticket_returns_success_and_message():
     store = AsyncMock()
     store.create_ticket.return_value = {"ticket_id": "SD-123", "work_item_id": "WI-123"}
     service_desk.configure_service_desk_store(store)
-    service = next(iter(service_desk.AFFECTED_SERVICES))
+    service = "email"
 
     result = await service_desk.create_service_desk_ticket(
         {
@@ -82,10 +87,30 @@ async def test_create_ticket_returns_success_and_message():
 
     assert result == {
         "success": True,
-        "message": "Service desk ticket SD-123 was created.",
+        "message": (
+            "Service desk ticket SD-123 was created. Give one final response in the "
+            "caller's language: thank them, state the ticket ID, explain that the follow-up "
+            "call can now occur, ask no further question, and say goodbye."
+        ),
         "ticket_id": "SD-123",
         "work_item_id": "WI-123",
+        "call_control": {
+            "action": "terminate_after_response",
+            "reason": "normal",
+            "ticket_id": "SD-123",
+            "work_item_id": "WI-123",
+        },
     }
+    store.create_ticket.assert_awaited_once_with(
+        name="Ada Lovelace",
+        callback_number="+14255550101",
+        urgency="high",
+        affected_service=service,
+        description="Cannot send messages.",
+        short_description="Email send failure",
+        intake_call_id=None,
+        intake_session_id=None,
+    )
 
 
 @pytest.mark.asyncio
@@ -99,7 +124,7 @@ async def test_create_ticket_returns_failure_when_persistence_fails():
             "name": "Ada Lovelace",
             "callback_number": "+14255550101",
             "urgency": "high",
-            "affected_service": next(iter(service_desk.AFFECTED_SERVICES)),
+            "affected_service": "email",
             "description": "Cannot send messages.",
             "short_description": "Email send failure",
         }
@@ -144,7 +169,7 @@ async def test_tools_fail_cleanly_until_store_is_configured():
             "name": "Ada Lovelace",
             "callback_number": "+14255550101",
             "urgency": "high",
-            "affected_service": next(iter(service_desk.AFFECTED_SERVICES)),
+            "affected_service": "email",
             "description": "Cannot send messages.",
             "short_description": "Email send failure",
         }
@@ -152,3 +177,26 @@ async def test_tools_fail_cleanly_until_store_is_configured():
 
     assert result["success"] is False
     assert "not configured" in result["message"].lower()
+
+
+@pytest.mark.asyncio
+async def test_list_services_returns_dynamic_names_without_phone_numbers():
+    store = AsyncMock()
+    store.get_configuration.return_value = {
+        "services": [
+            {
+                "service_id": "svc-1",
+                "name": "Identity Platform",
+                "phone_number": "+14255550999",
+            }
+        ]
+    }
+    service_desk.configure_service_desk_store(store)
+
+    result = await service_desk.list_service_desk_services({})
+
+    assert result == {
+        "success": True,
+        "message": "Configured service names were loaded.",
+        "services": [{"service_id": "svc-1", "name": "Identity Platform"}],
+    }

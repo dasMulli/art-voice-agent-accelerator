@@ -6,13 +6,12 @@ from typing import Any
 
 from apps.artagent.backend.registries.toolstore.registry import register_tool
 from apps.artagent.backend.src.services.service_desk import (
-    AFFECTED_SERVICES,
     KNOWN_CALLERS,
     ServiceDeskStore,
     Urgency,
     normalize_e164,
-    standby_number_for,
 )
+from apps.artagent.backend.voice.shared.terminal_action import build_terminal_action
 from utils.ml_logging import get_logger
 
 _service_desk_store: ServiceDeskStore | None = None
@@ -41,6 +40,16 @@ LOOKUP_KNOWN_CALLER_SCHEMA: dict[str, Any] = {
     },
 }
 
+LIST_SERVICE_DESK_SERVICES_SCHEMA: dict[str, Any] = {
+    "name": "list_service_desk_services",
+    "description": "List the service names currently accepted for service desk tickets.",
+    "parameters": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": False,
+    },
+}
+
 CREATE_SERVICE_DESK_TICKET_SCHEMA: dict[str, Any] = {
     "name": "create_service_desk_ticket",
     "description": (
@@ -62,8 +71,9 @@ CREATE_SERVICE_DESK_TICKET_SCHEMA: dict[str, Any] = {
             },
             "affected_service": {
                 "type": "string",
-                "enum": list(AFFECTED_SERVICES),
-                "description": "Service affected by the incident.",
+                "description": (
+                    "Current configured service name returned by list_service_desk_services."
+                ),
             },
             "description": {
                 "type": "string",
@@ -143,6 +153,29 @@ async def lookup_known_caller(args: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+async def list_service_desk_services(_: dict[str, Any]) -> dict[str, Any]:
+    """List currently enabled service routes without exposing phone numbers."""
+    if _service_desk_store is None:
+        return {"success": False, "message": "Service desk store is not configured."}
+    try:
+        configuration = await _service_desk_store.get_configuration()
+    except Exception:  # noqa: BLE001
+        logger.exception("Service desk service lookup failed")
+        return {
+            "success": False,
+            "message": "Configured service names could not be loaded. Please try again.",
+        }
+    services = [
+        {"service_id": service["service_id"], "name": service["name"]}
+        for service in configuration["services"]
+    ]
+    return {
+        "success": True,
+        "message": "Configured service names were loaded.",
+        "services": services,
+    }
+
+
 async def create_service_desk_ticket(args: dict[str, Any]) -> dict[str, Any]:
     """Validate incident details and create a ticket through the configured store."""
     if _service_desk_store is None:
@@ -168,12 +201,15 @@ async def create_service_desk_ticket(args: dict[str, Any]) -> dict[str, Any]:
     try:
         values["callback_number"] = normalize_e164(values["callback_number"])
         values["urgency"] = Urgency(values["urgency"].lower()).value
-        values["affected_service"], _ = standby_number_for(values["affected_service"])
     except ValueError as exc:
         return {"success": False, "message": str(exc)}
 
     try:
-        ticket = await _service_desk_store.create_ticket(**values)
+        ticket = await _service_desk_store.create_ticket(
+            **values,
+            intake_call_id=str(args.get("_call_connection_id") or "").strip() or None,
+            intake_session_id=str(args.get("_session_id") or "").strip() or None,
+        )
     except ValueError as exc:
         return {"success": False, "message": str(exc)}
     except Exception:  # noqa: BLE001
@@ -186,9 +222,17 @@ async def create_service_desk_ticket(args: dict[str, Any]) -> dict[str, Any]:
     ticket_id = ticket["ticket_id"]
     return {
         "success": True,
-        "message": f"Service desk ticket {ticket_id} was created.",
+        "message": (
+            f"Service desk ticket {ticket_id} was created. Give one final response in the "
+            "caller's language: thank them, state the ticket ID, explain that the follow-up "
+            "call can now occur, ask no further question, and say goodbye."
+        ),
         "ticket_id": ticket_id,
         "work_item_id": ticket["work_item_id"],
+        "call_control": build_terminal_action(
+            ticket_id=ticket_id,
+            work_item_id=ticket["work_item_id"],
+        ),
     }
 
 
@@ -261,6 +305,12 @@ register_tool(
     tags={"service_desk", "caller_lookup"},
 )
 register_tool(
+    "list_service_desk_services",
+    LIST_SERVICE_DESK_SERVICES_SCHEMA,
+    list_service_desk_services,
+    tags={"service_desk", "ticketing"},
+)
+register_tool(
     "create_service_desk_ticket",
     CREATE_SERVICE_DESK_TICKET_SCHEMA,
     create_service_desk_ticket,
@@ -274,13 +324,14 @@ register_tool(
 )
 
 __all__ = [
-    "AFFECTED_SERVICES",
     "KNOWN_CALLERS",
     "CREATE_SERVICE_DESK_TICKET_SCHEMA",
+    "LIST_SERVICE_DESK_SERVICES_SCHEMA",
     "LOOKUP_KNOWN_CALLER_SCHEMA",
     "RECORD_SERVICE_DESK_CONFIRMATION_SCHEMA",
     "configure_service_desk_store",
     "create_service_desk_ticket",
+    "list_service_desk_services",
     "lookup_known_caller",
     "record_service_desk_confirmation",
 ]

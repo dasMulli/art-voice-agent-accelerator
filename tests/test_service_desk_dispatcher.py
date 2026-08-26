@@ -46,9 +46,17 @@ async def test_dispatch_once_claims_calls_and_attaches_confirmation_context() ->
         "affected_service": "vpn",
     }
     store = SimpleNamespace(
+        reconcile_intake_disconnects=AsyncMock(return_value=0),
         expire_overdue=AsyncMock(return_value=0),
         claim_due_work=AsyncMock(side_effect=[work_item, None]),
         get_ticket=AsyncMock(return_value=ticket),
+        resolve_work_item_route=AsyncMock(
+            return_value={
+                "service_id": "vpn",
+                "name": "Remote Access",
+                "phone_number": "+14255550999",
+            }
+        ),
         mark_attempt_started=AsyncMock(return_value={**work_item, "status": "calling"}),
         release_after_failure=AsyncMock(),
         renew_call_lease=AsyncMock(return_value=True),
@@ -90,7 +98,7 @@ async def test_dispatch_once_claims_calls_and_attaches_confirmation_context() ->
     lifecycle_handler.start_outbound_call.assert_awaited_once()
     assert (
         lifecycle_handler.start_outbound_call.await_args.kwargs["target_number"]
-        == "+14255550201"
+        == "+14255550999"
     )
     store.mark_attempt_started.assert_awaited_once_with(
         "WI-1",
@@ -102,8 +110,10 @@ async def test_dispatch_once_claims_calls_and_attaches_confirmation_context() ->
     assert context["scenario"] == "service_desk"
     assert context["active_agent"] == "StandbyConfirmationAgent"
     assert context["start_agent"] == "StandbyConfirmationAgent"
-    assert context["ticket"] == ticket
+    assert context["ticket"]["affected_service"] == "Remote Access"
+    assert context["ticket"]["service_id"] == "vpn"
     assert context["work_item"]["work_item_id"] == "WI-1"
+    assert context["work_item"]["standby_number"] == "+14255550999"
     assert context["call_id"] == "call-1"
     assert context["session_id"].startswith("service-desk-WI-1-")
     set_session_agent.assert_called_once_with(
@@ -131,9 +141,17 @@ async def test_dispatch_once_claims_calls_and_attaches_confirmation_context() ->
 async def test_failed_initiation_requeues_claimed_work() -> None:
     work_item = make_work_item()
     store = SimpleNamespace(
+        reconcile_intake_disconnects=AsyncMock(return_value=0),
         expire_overdue=AsyncMock(return_value=0),
         claim_due_work=AsyncMock(side_effect=[work_item, None]),
         get_ticket=AsyncMock(return_value={"ticket_id": "SD-1"}),
+        resolve_work_item_route=AsyncMock(
+            return_value={
+                "service_id": "email",
+                "name": "Email",
+                "phone_number": "+14255550201",
+            }
+        ),
         mark_attempt_started=AsyncMock(),
         release_after_failure=AsyncMock(),
         renew_call_lease=AsyncMock(return_value=True),
@@ -184,7 +202,11 @@ async def test_disconnect_uses_durable_mapping_after_dispatcher_recreation() -> 
             }
         ),
     )
-    store = SimpleNamespace(release_after_disconnect=AsyncMock())
+    store = SimpleNamespace(
+        release_after_disconnect=AsyncMock(),
+        activate_after_intake_disconnect=AsyncMock(),
+        record_intake_disconnect=AsyncMock(),
+    )
     dispatcher = ServiceDeskDispatcher(
         store=store,
         acs_caller=object(),
@@ -202,6 +224,34 @@ async def test_disconnect_uses_durable_mapping_after_dispatcher_recreation() -> 
         "remote hangup",
         call_id="call-1",
     )
+    store.record_intake_disconnect.assert_not_awaited()
+    store.activate_after_intake_disconnect.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_intake_disconnect_enables_follow_up_work() -> None:
+    store = SimpleNamespace(
+        release_after_disconnect=AsyncMock(),
+        record_intake_disconnect=AsyncMock(),
+        activate_after_intake_disconnect=AsyncMock(
+            return_value={"work_item_id": "WI-1", "status": "pending"}
+        ),
+    )
+    dispatcher = ServiceDeskDispatcher(
+        store=store,
+        acs_caller=object(),
+        redis_mgr=FakeRedis(),
+        conn_manager=SimpleNamespace(),
+        app_state=SimpleNamespace(),
+    )
+
+    await dispatcher.handle_call_disconnected("intake-call-1", "disconnected")
+
+    store.record_intake_disconnect.assert_awaited_once_with("intake-call-1")
+    store.activate_after_intake_disconnect.assert_awaited_once_with(
+        call_id="intake-call-1"
+    )
+    store.release_after_disconnect.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -211,7 +261,11 @@ async def test_incomplete_durable_mapping_is_ignored() -> None:
         "service_desk:call:call-1",
         json.dumps({"work_item_id": "WI-1"}),
     )
-    store = SimpleNamespace(release_after_disconnect=AsyncMock())
+    store = SimpleNamespace(
+        release_after_disconnect=AsyncMock(),
+        record_intake_disconnect=AsyncMock(),
+        activate_after_intake_disconnect=AsyncMock(return_value=None),
+    )
     dispatcher = ServiceDeskDispatcher(
         store=store,
         acs_caller=object(),
@@ -263,6 +317,7 @@ async def test_dispatch_once_rehydrates_and_renews_active_calls() -> None:
     store = SimpleNamespace(
         list_work_items=AsyncMock(return_value=[active]),
         renew_call_lease=AsyncMock(return_value=True),
+        reconcile_intake_disconnects=AsyncMock(return_value=0),
         expire_overdue=AsyncMock(return_value=0),
         claim_due_work=AsyncMock(return_value=None),
     )
@@ -288,6 +343,7 @@ async def test_dispatch_once_rehydrates_and_renews_active_calls() -> None:
 @pytest.mark.asyncio
 async def test_stop_cancels_dispatcher_task_cleanly() -> None:
     store = SimpleNamespace(
+        reconcile_intake_disconnects=AsyncMock(return_value=0),
         expire_overdue=AsyncMock(return_value=0),
         claim_due_work=AsyncMock(return_value=None),
         renew_call_lease=AsyncMock(return_value=True),

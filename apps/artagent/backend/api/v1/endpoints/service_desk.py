@@ -1,4 +1,4 @@
-"""Read-only service desk inspection endpoints."""
+"""Service desk inspection and configuration endpoints."""
 
 from __future__ import annotations
 
@@ -9,11 +9,17 @@ from apps.artagent.backend.api.v1.schemas.service_desk import (
     AttemptHistoryEntry,
     ConfirmationEvent,
     CorrectionNote,
+    ServiceDeskConfigurationResponse,
+    ServiceDeskConfigurationUpdate,
     ServiceDeskTicket,
     ServiceDeskTicketDetailResponse,
     ServiceDeskTicketListResponse,
     ServiceDeskTicketSummary,
     ServiceDeskWorkItem,
+)
+from apps.artagent.backend.src.services.service_desk.store import (
+    ServiceDeskConfigurationConflictError,
+    ServiceDeskServiceInUseError,
 )
 from fastapi import APIRouter, HTTPException, Query, Request, status
 
@@ -57,6 +63,51 @@ def _attempt_history(work_item: dict | None) -> list[AttemptHistoryEntry]:
             reason=work_item.get("last_release_reason"),
         )
     ]
+
+
+@router.get(
+    "/configuration",
+    response_model=ServiceDeskConfigurationResponse,
+    tags=["Service Desk"],
+)
+async def get_configuration(request: Request) -> ServiceDeskConfigurationResponse:
+    """Return the current service routing and retry configuration."""
+    configuration = await _store_from_request(request).get_configuration()
+    return ServiceDeskConfigurationResponse.model_validate(configuration)
+
+
+@router.put(
+    "/configuration",
+    response_model=ServiceDeskConfigurationResponse,
+    tags=["Service Desk"],
+)
+async def update_configuration(
+    payload: ServiceDeskConfigurationUpdate,
+    request: Request,
+) -> ServiceDeskConfigurationResponse:
+    """Validate and atomically replace editable service desk configuration."""
+    try:
+        configuration = await _store_from_request(request).update_configuration(
+            expected_revision=payload.expected_revision,
+            retry_intervals_minutes=payload.retry_intervals_minutes,
+            services=[service.model_dump() for service in payload.services],
+        )
+    except ServiceDeskConfigurationConflictError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"code": "revision_conflict", "message": str(exc)},
+        ) from exc
+    except ServiceDeskServiceInUseError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"code": "service_in_use", "message": str(exc)},
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    return ServiceDeskConfigurationResponse.model_validate(configuration)
 
 
 @router.get(

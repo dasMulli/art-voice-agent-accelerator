@@ -7,6 +7,10 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from apps.artagent.backend.api.v1 import v1_router
 from apps.artagent.backend.api.v1.endpoints.service_desk import router
+from apps.artagent.backend.src.services.service_desk.store import (
+    ServiceDeskConfigurationConflictError,
+    ServiceDeskServiceInUseError,
+)
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -64,6 +68,20 @@ class FakeServiceDeskStore:
         self.work_items = work_items
         self.list_ticket_limits: list[int] = []
         self.list_work_item_calls: list[tuple[str | None, int]] = []
+        self.configuration = {
+            "revision": 1,
+            "retry_intervals_minutes": [10],
+            "services": [
+                {
+                    "service_id": "email",
+                    "name": "Email",
+                    "phone_number": "+14255550201",
+                }
+            ],
+            "created_at": NOW,
+            "updated_at": NOW,
+        }
+        self.update_error: Exception | None = None
 
     async def list_tickets(self, *, limit: int = 100) -> list[dict]:
         self.list_ticket_limits.append(limit)
@@ -88,6 +106,21 @@ class FakeServiceDeskStore:
             None,
         )
 
+    async def get_configuration(self) -> dict:
+        return self.configuration
+
+    async def update_configuration(self, **values) -> dict:
+        if self.update_error:
+            raise self.update_error
+        self.configuration = {
+            **self.configuration,
+            "revision": self.configuration["revision"] + 1,
+            "retry_intervals_minutes": values["retry_intervals_minutes"],
+            "services": values["services"],
+            "updated_at": NOW + timedelta(minutes=1),
+        }
+        return self.configuration
+
 
 def _client(store: FakeServiceDeskStore | None = None) -> TestClient:
     app = FastAPI()
@@ -104,6 +137,7 @@ def test_v1_router_registers_service_desk_paths() -> None:
 
     assert "/api/v1/service-desk/tickets" in paths
     assert "/api/v1/service-desk/tickets/{ticket_id}" in paths
+    assert "/api/v1/service-desk/configuration" in paths
 
 
 def test_list_tickets_filters_by_work_status_and_paginates() -> None:
@@ -215,11 +249,114 @@ def test_get_ticket_returns_404_for_unknown_ticket() -> None:
     assert response.json() == {"detail": "Service desk ticket not found"}
 
 
+def test_configuration_can_be_read_and_updated() -> None:
+    store = FakeServiceDeskStore([], [])
+    client = _client(store)
+
+    current = client.get("/api/v1/service-desk/configuration")
+    updated = client.put(
+        "/api/v1/service-desk/configuration",
+        json={
+            "expected_revision": 1,
+            "retry_intervals_minutes": [1, 2, 5, 10, 30],
+            "services": [
+                {
+                    "service_id": "email",
+                    "name": "Messaging",
+                    "phone_number": "+14255550999",
+                }
+            ],
+        },
+    )
+
+    assert current.status_code == 200
+    assert current.json()["retry_intervals_minutes"] == [10]
+    assert updated.status_code == 200
+    assert updated.json()["revision"] == 2
+    assert updated.json()["services"][0]["name"] == "Messaging"
+
+
+def test_configuration_update_returns_conflict_for_stale_revision() -> None:
+    store = FakeServiceDeskStore([], [])
+    store.update_error = ServiceDeskConfigurationConflictError("reload and try again")
+
+    response = _client(store).put(
+        "/api/v1/service-desk/configuration",
+        json={
+            "expected_revision": 1,
+            "retry_intervals_minutes": [10],
+            "services": [
+                {
+                    "service_id": "email",
+                    "name": "Email",
+                    "phone_number": "+14255550201",
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 409
+    assert response.json() == {
+        "detail": {
+            "code": "revision_conflict",
+            "message": "reload and try again",
+        }
+    }
+
+
+def test_configuration_update_rejects_non_integer_retry_values() -> None:
+    response = _client(FakeServiceDeskStore([], [])).put(
+        "/api/v1/service-desk/configuration",
+        json={
+            "expected_revision": 1,
+            "retry_intervals_minutes": [True],
+            "services": [
+                {
+                    "service_id": "email",
+                    "name": "Email",
+                    "phone_number": "+14255550201",
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 422
+
+
+def test_configuration_update_returns_in_use_conflict_without_revision_code() -> None:
+    store = FakeServiceDeskStore([], [])
+    store.update_error = ServiceDeskServiceInUseError("service is still used")
+
+    response = _client(store).put(
+        "/api/v1/service-desk/configuration",
+        json={
+            "expected_revision": 1,
+            "retry_intervals_minutes": [10],
+            "services": [
+                {
+                    "service_id": "email",
+                    "name": "Email",
+                    "phone_number": "+14255550201",
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 409
+    assert response.json() == {
+        "detail": {
+            "code": "service_in_use",
+            "message": "service is still used",
+        }
+    }
+
+
 @pytest.mark.parametrize(
     "path",
     [
         "/api/v1/service-desk/tickets",
         "/api/v1/service-desk/tickets/SD-1",
+        "/api/v1/service-desk/configuration",
     ],
 )
 def test_endpoints_return_503_when_store_is_unavailable(path: str) -> None:

@@ -2048,6 +2048,10 @@ class CascadeOrchestratorAdapter:
                                         client_id = cm.get_value_from_corememory("client_id")
                                         if client_id:
                                             args["_client_id"] = client_id
+                                    args["_call_connection_id"] = (
+                                        self.config.call_connection_id or ""
+                                    )
+                                    args["_session_id"] = self.config.session_id or ""
                                     result = await agent.execute_tool(tool_name, args)
                                     logger.info(
                                         "Tool executed | name=%s result_keys=%s",

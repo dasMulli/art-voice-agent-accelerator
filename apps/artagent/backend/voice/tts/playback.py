@@ -1233,6 +1233,20 @@ class TTSPlayback:
         self._transport_playback_until = 0.0
         self._last_transport_audio_sent_at = 0.0
 
+    async def wait_for_playback_complete(self, *, timeout_s: float = 10.0) -> bool:
+        """Wait until locally tracked transport playback has drained."""
+        deadline = time.perf_counter() + timeout_s
+        while self.has_pending_transport_playback:
+            remaining = deadline - time.perf_counter()
+            if remaining <= 0:
+                logger.warning(
+                    "[%s] Timed out waiting for transport playback to drain",
+                    self._session_short,
+                )
+                return False
+            await asyncio.sleep(min(0.05, remaining))
+        return True
+
     async def stop_transport_playback(self, *, reason: str = "barge_in") -> bool:
         """Actively stop ACS-side playback and clear any buffered media."""
         self.cancel()

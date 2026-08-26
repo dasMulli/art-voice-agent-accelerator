@@ -81,6 +81,7 @@ from apps.artagent.backend.voice.messaging import (
 from apps.artagent.backend.src.orchestration.session_agents import get_session_agent
 from apps.artagent.backend.src.orchestration.naming import find_agent_by_name
 from apps.artagent.backend.voice.shared.config_resolver import resolve_orchestrator_config
+from apps.artagent.backend.voice.shared.terminal_action import TerminalAction
 
 # Pool management
 from src.pools.session_manager import SessionContext
@@ -257,6 +258,8 @@ class VoiceHandler:
         self._last_activity_ts = time.monotonic()
         self._idle_task: asyncio.Task | None = None
         self._idle_disconnect_in_progress = False
+        self._terminal_action: TerminalAction | None = None
+        self._termination_in_progress = False
 
         # Task tracking
         self._orchestration_tasks: set = set()
@@ -904,6 +907,9 @@ class VoiceHandler:
         except Exception as e:
             logger.error("[%s] Pool release error: %s", self._session_short, e)
 
+        if self._transport != TransportType.ACS and self._browser_transport_closed():
+            await self._activate_browser_follow_up()
+
         logger.info("[%s] VoiceHandler stopped", self._session_short)
 
     # =========================================================================
@@ -919,6 +925,8 @@ class VoiceHandler:
         Args:
             audio_bytes: PCM16LE audio data.
         """
+        if self._terminal_action is not None:
+            return
         if self._stt_thread:
             self._stt_thread.write_audio(audio_bytes)
 
@@ -974,6 +982,9 @@ class VoiceHandler:
         Args:
             text: User's text message.
         """
+        if self._terminal_action is not None:
+            logger.debug("[%s] Ignoring text after terminal response started", self._session_short)
+            return
         if not text or not text.strip():
             return
 
@@ -1008,6 +1019,12 @@ class VoiceHandler:
             message: Parsed ACS WebSocket message.
         """
         kind = message.get("kind")
+
+        if self._terminal_action is not None and kind in {
+            ACSMessageKind.AUDIO_DATA,
+            ACSMessageKind.DTMF_DATA,
+        }:
+            return
 
         if kind == ACSMessageKind.AUDIO_METADATA:
             self._metadata_received = True
@@ -1402,9 +1419,81 @@ class VoiceHandler:
 
     async def _on_partial_transcript(self, text: str, language: str, speaker: str | None) -> None:
         """Handle partial (interim) transcript."""
+        if self._terminal_action is not None:
+            return
         ws = self._context.websocket
         if ws:
             await send_user_partial_transcript(ws, text)
+
+    def begin_terminal_response(self, action: TerminalAction) -> None:
+        """Suppress new caller input while the final response is produced."""
+        if self._terminal_action is None:
+            self._terminal_action = action
+            logger.info(
+                "[%s] Terminal response started | ticket=%s",
+                self._session_short,
+                action.ticket_id,
+            )
+
+    async def finish_terminal_response(self, action: TerminalAction) -> None:
+        """Drain final TTS and terminate the current voice session."""
+        if self._termination_in_progress:
+            return
+        self.begin_terminal_response(action)
+        self._termination_in_progress = True
+        self._running = False
+        await self._cancel_idle_monitor()
+
+        if self._tts:
+            await self._tts.wait_for_playback_complete(timeout_s=10.0)
+
+        ws = self._context.websocket
+        if ws is None:
+            return
+
+        from apps.artagent.backend.src.services.acs.session_terminator import (
+            TerminationReason,
+            terminate_session,
+        )
+
+        result = await terminate_session(
+            ws,
+            is_acs=self._transport == TransportType.ACS,
+            call_connection_id=self._context.call_connection_id,
+            reason=TerminationReason.NORMAL,
+            play_goodbye=False,
+        )
+
+        if self._transport != TransportType.ACS and result.websocket_closed:
+            await self._activate_browser_follow_up()
+
+    def _browser_transport_closed(self) -> bool:
+        ws = self._context.websocket
+        if ws is None:
+            return True
+        return (
+            getattr(ws, "application_state", None) == WebSocketState.DISCONNECTED
+            or getattr(ws, "client_state", None) == WebSocketState.DISCONNECTED
+        )
+
+    async def _activate_browser_follow_up(self) -> None:
+        """Enable callback work only after the browser transport is closed."""
+        action = self._terminal_action
+        if action is None or not action.work_item_id:
+            return
+        store = getattr(self._app_state, "service_desk_store", None)
+        if store is None:
+            return
+        try:
+            await store.activate_after_intake_disconnect(
+                session_id=self._session_id,
+                work_item_id=action.work_item_id,
+            )
+        except Exception:
+            logger.exception(
+                "[%s] Failed to enable service desk follow-up after browser disconnect",
+                self._session_short,
+            )
 
     async def _on_tts_request(
         self,

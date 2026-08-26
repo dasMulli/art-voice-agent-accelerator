@@ -46,6 +46,7 @@ from apps.artagent.backend.voice.shared import (
     resolve_from_app_state,
     resolve_orchestrator_config,
 )
+from apps.artagent.backend.voice.shared.terminal_action import TerminalAction
 from apps.artagent.backend.src.services.session_loader import load_user_profile_by_email
 from apps.artagent.backend.src.orchestration.session_agents import get_session_agent
 
@@ -101,6 +102,10 @@ tracer = trace.get_tracer(__name__)
 
 _DTMF_FLUSH_DELAY_SECONDS = 1.5
 _VOICELIVE_WARMUP_WAIT_SECONDS = 0.75
+_VOICELIVE_PCM_SAMPLE_RATE = 24000
+_PCM16_BYTES_PER_SAMPLE = 2
+_TERMINAL_RESPONSE_IDLE_TIMEOUT_SECONDS = 20.0
+_TERMINAL_PLAYBACK_PADDING_SECONDS = 0.25
 
 
 @dataclass
@@ -185,10 +190,17 @@ class _SessionMessenger:
     """Bridge VoiceLive events to the session-aware WebSocket manager."""
 
     def __init__(
-        self, websocket: WebSocket, *, background_task_fn: BackgroundTaskFn
+        self,
+        websocket: WebSocket,
+        *,
+        background_task_fn: BackgroundTaskFn,
+        terminal_action_fn: Callable[[TerminalAction], Awaitable[None]] | None = None,
+        terminal_response_started_fn: Callable[[TerminalAction], Awaitable[None]] | None = None,
     ) -> None:
         self._ws = websocket
         self._background_task_fn = background_task_fn
+        self._terminal_action_fn = terminal_action_fn
+        self._terminal_response_started_fn = terminal_response_started_fn
         self._default_sender: str | None = None
         self._missing_session_warned = False
         self._active_turn_id: str | None = None
@@ -754,6 +766,16 @@ class _SessionMessenger:
         except Exception:
             logger.debug("Failed to emit tool_end frame for VoiceLive session", exc_info=True)
 
+    async def prepare_terminal_response(self, action: TerminalAction) -> None:
+        """Suppress caller input while the orchestrator prepares its final response."""
+        if self._terminal_action_fn is not None:
+            await self._terminal_action_fn(action)
+
+    async def mark_terminal_response_started(self, action: TerminalAction) -> None:
+        """Tell the handler that the post-tool response has been requested."""
+        if self._terminal_response_started_fn is not None:
+            await self._terminal_response_started_fn(action)
+
 
 VoiceLiveTransport = Literal["acs", "realtime"]
 
@@ -789,7 +811,10 @@ class VoiceLiveSDKHandler:
 
         # Pass background task function to messenger for tracked task creation
         self._messenger = _SessionMessenger(
-            websocket, background_task_fn=self._background_task
+            websocket,
+            background_task_fn=self._background_task,
+            terminal_action_fn=self.begin_terminal_response,
+            terminal_response_started_fn=self.mark_terminal_response_started,
         )
         self._transport: VoiceLiveTransport = transport
         self._manual_commit_enabled = transport == "acs"
@@ -833,6 +858,13 @@ class VoiceLiveSDKHandler:
         self._llm_first_token_time: float | None = None
         self._tts_first_audio_time: float | None = None
         self._current_response_id: str | None = None
+        self._terminal_action: TerminalAction | None = None
+        self._terminal_response_started = False
+        self._terminal_response_id: str | None = None
+        self._terminal_timeout_task: asyncio.Task[None] | None = None
+        self._termination_task: asyncio.Task[None] | None = None
+        self._terminal_last_progress_at: float | None = None
+        self._terminal_playback_deadline = 0.0
 
     def _set_metadata(self, key: str, value: Any) -> None:
         if not _set_connection_metadata(self.websocket, key, value):
@@ -1376,6 +1408,27 @@ class VoiceLiveSDKHandler:
             self._running = False
             self._shutdown.set()
 
+            if self._transport != "acs" and not self._websocket_open:
+                await self._activate_browser_follow_up()
+
+            if self._terminal_timeout_task and not self._terminal_timeout_task.done():
+                self._terminal_timeout_task.cancel()
+            self._terminal_timeout_task = None
+
+            termination_task = self._termination_task
+            if (
+                termination_task
+                and not termination_task.done()
+                and termination_task is not asyncio.current_task()
+            ):
+                try:
+                    await asyncio.wait_for(asyncio.shield(termination_task), timeout=6.0)
+                except (TimeoutError, asyncio.CancelledError):
+                    logger.warning(
+                        "Terminal call shutdown did not finish before handler cleanup | session=%s",
+                        self.session_id,
+                    )
+
             # Unregister from scenario update callbacks
             unregister_voicelive_orchestrator(self.session_id)
 
@@ -1478,6 +1531,13 @@ class VoiceLiveSDKHandler:
 
         kind = payload.get("kind") or payload.get("Kind")
 
+        if self._terminal_action is not None and kind in {
+            "AudioData",
+            "DtmfData",
+            "StopAudio",
+        }:
+            return
+
         if kind == "AudioMetadata":
             metadata = payload.get("payload", {})
             self._acs_sample_rate = metadata.get("rate", self._acs_sample_rate)
@@ -1511,6 +1571,8 @@ class VoiceLiveSDKHandler:
 
     async def handle_pcm_chunk(self, audio_bytes: bytes, sample_rate: int = 16000) -> None:
         """Forward raw PCM frames (e.g., from realtime WS) to VoiceLive."""
+        if self._terminal_action is not None:
+            return
         if not self._running or not self._connection or not audio_bytes:
             return
 
@@ -1525,6 +1587,8 @@ class VoiceLiveSDKHandler:
 
     async def commit_audio_buffer(self) -> None:
         """Commit the current VoiceLive input buffer to trigger response generation."""
+        if self._terminal_action is not None:
+            return
         if not self._manual_commit_enabled:
             return
         await self._commit_input_buffer()
@@ -1692,6 +1756,8 @@ class VoiceLiveSDKHandler:
             )
             if response_id:
                 self._active_response_ids.add(response_id)
+                if self._terminal_response_started and self._terminal_response_id is None:
+                    self._terminal_response_id = response_id
             self._stop_audio_pending = False
             await self._send_audio_delta(event.delta, response_id=response_id)
 
@@ -1841,12 +1907,136 @@ class VoiceLiveSDKHandler:
                 await self._emit_audio_frame_to_ui(
                     None, data_b64=None, frame_index=self._final_frame_index(None), is_final=True
                 )
+            if self._is_terminal_response_complete(response_id):
+                self._start_terminal_termination()
         elif etype == ServerEventType.ERROR:
             await self._handle_server_error(event)
             self._mark_audio_playback(False)
 
         elif etype == ServerEventType.CONVERSATION_ITEM_CREATED:
             logger.debug("Conversation item created: %s", event.item.id)
+
+    async def begin_terminal_response(self, action: TerminalAction) -> None:
+        """Suppress new caller input after a terminal tool result."""
+        if self._terminal_action is not None:
+            return
+        self._terminal_action = action
+        self._terminal_last_progress_at = time.monotonic()
+        logger.info(
+            "VoiceLive terminal response pending | session=%s ticket=%s",
+            self.session_id,
+            action.ticket_id,
+        )
+        self._ensure_terminal_timeout()
+
+    async def mark_terminal_response_started(self, action: TerminalAction) -> None:
+        """Arm termination for the post-tool response requested by the orchestrator."""
+        await self.begin_terminal_response(action)
+        self._terminal_response_started = True
+        self._terminal_last_progress_at = time.monotonic()
+        self._ensure_terminal_timeout()
+
+    def _ensure_terminal_timeout(self) -> None:
+        """Ensure terminal input suppression always reaches shutdown."""
+        if self._terminal_timeout_task and not self._terminal_timeout_task.done():
+            return
+        self._terminal_timeout_task = asyncio.create_task(
+            self._terminal_response_timeout(),
+            name=f"voicelive-terminal-timeout-{self.session_id}",
+        )
+
+    async def _terminal_response_timeout(self) -> None:
+        """Terminate if a valid terminal response produces no audio completion event."""
+        while True:
+            last_progress = self._terminal_last_progress_at or time.monotonic()
+            remaining = _TERMINAL_RESPONSE_IDLE_TIMEOUT_SECONDS - (
+                time.monotonic() - last_progress
+            )
+            if remaining <= 0:
+                break
+            try:
+                await asyncio.sleep(remaining)
+            except asyncio.CancelledError:
+                return
+        logger.warning(
+            "VoiceLive terminal response timed out; ending call | session=%s",
+            self.session_id,
+        )
+        self._start_terminal_termination()
+
+    def _is_terminal_response_complete(self, response_id: str | None) -> bool:
+        """Return whether an audio-complete event belongs to the final response."""
+        return (
+            self._terminal_response_started
+            and self._terminal_action is not None
+            and (
+                self._terminal_response_id is None
+                or response_id == self._terminal_response_id
+            )
+        )
+
+    def _start_terminal_termination(self) -> None:
+        """Start terminal call shutdown once, outside the VoiceLive event loop."""
+        if self._termination_task and not self._termination_task.done():
+            return
+        if (
+            self._terminal_timeout_task
+            and not self._terminal_timeout_task.done()
+            and self._terminal_timeout_task is not asyncio.current_task()
+        ):
+            self._terminal_timeout_task.cancel()
+        self._terminal_timeout_task = None
+        self._termination_task = asyncio.create_task(
+            self._terminate_after_terminal_playback(),
+            name=f"voicelive-terminal-shutdown-{self.session_id}",
+        )
+
+    async def _terminate_after_terminal_playback(self) -> None:
+        """Wait for queued PCM duration before closing the transport."""
+        remaining = self._terminal_playback_deadline - time.monotonic()
+        if remaining > 0:
+            await asyncio.sleep(remaining + _TERMINAL_PLAYBACK_PADDING_SECONDS)
+        await self._terminate_after_terminal_response()
+
+    async def _terminate_after_terminal_response(self) -> None:
+        """Hang up after the final VoiceLive response has finished."""
+        action = self._terminal_action
+        if action is None:
+            return
+        from apps.artagent.backend.src.services.acs.session_terminator import (
+            TerminationReason,
+            terminate_session,
+        )
+
+        result = await terminate_session(
+            self.websocket,
+            is_acs=self._transport == "acs",
+            call_connection_id=self.call_connection_id,
+            reason=TerminationReason.NORMAL,
+            play_goodbye=False,
+        )
+
+        if self._transport != "acs" and result.websocket_closed:
+            await self._activate_browser_follow_up()
+
+    async def _activate_browser_follow_up(self) -> None:
+        """Enable callback work only after the browser transport is closed."""
+        action = self._terminal_action
+        if action is None or not action.work_item_id:
+            return
+        store = getattr(self.websocket.app.state, "service_desk_store", None)
+        if store is not None:
+            try:
+                await store.activate_after_intake_disconnect(
+                    session_id=self.session_id,
+                    work_item_id=action.work_item_id,
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to enable service desk follow-up after browser disconnect "
+                    "| session=%s",
+                    self.session_id,
+                )
 
     async def _send_audio_delta(self, audio_bytes: bytes, *, response_id: str | None) -> None:
         pcm_bytes = self._to_pcm_bytes(audio_bytes)
@@ -1879,8 +2069,32 @@ class VoiceLiveSDKHandler:
                 frame_index=frame_index,
                 is_final=False,
             )
+            self._record_terminal_audio_progress(
+                response_id,
+                duration_seconds=(
+                    len(pcm_bytes)
+                    / (_VOICELIVE_PCM_SAMPLE_RATE * _PCM16_BYTES_PER_SAMPLE)
+                ),
+            )
         except Exception:
             logger.debug("Failed to relay audio delta", exc_info=True)
+
+    def _record_terminal_audio_progress(
+        self,
+        response_id: str | None,
+        *,
+        duration_seconds: float,
+    ) -> None:
+        """Track the final response's queued playback duration and progress."""
+        if not self._terminal_response_started or self._terminal_action is None:
+            return
+        if self._terminal_response_id and response_id != self._terminal_response_id:
+            return
+        now = time.monotonic()
+        self._terminal_last_progress_at = now
+        self._terminal_playback_deadline = (
+            max(now, self._terminal_playback_deadline) + duration_seconds
+        )
 
     async def _emit_audio_frame_to_ui(
         self,

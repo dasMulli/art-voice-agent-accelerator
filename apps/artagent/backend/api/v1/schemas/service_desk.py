@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, Field
+
+RetryIntervalMinutes = Annotated[int, Field(strict=True, ge=1, le=1440)]
 
 
 class CorrectionNote(BaseModel):
@@ -42,6 +45,7 @@ class ServiceDeskTicket(BaseModel):
     name: str
     callback_number: str
     urgency: str
+    service_id: str | None = None
     affected_service: str
     description: str
     short_description: str
@@ -62,11 +66,12 @@ class ServiceDeskWorkItem(BaseModel):
     work_item_id: str
     ticket_id: str
     callback_number: str
+    service_id: str | None = None
     standby_number: str
     status: str
     attempt_count: int
     retry_interval_seconds: int
-    next_attempt_at: datetime
+    next_attempt_at: datetime | None = None
     expires_at: datetime
     call_id: str | None = None
     lease_owner: str | None = None
@@ -116,3 +121,37 @@ class ServiceDeskTicketDetailResponse(BaseModel):
     attempt_history: list[AttemptHistoryEntry]
     correction_notes: list[CorrectionNote]
     confirmation_events: list[ConfirmationEvent]
+
+
+class ServiceDeskServiceRoute(BaseModel):
+    """One editable service-to-phone route."""
+
+    service_id: str
+    name: str
+    phone_number: str
+
+
+class ServiceDeskServiceRouteUpdate(BaseModel):
+    """Editable route fields; new services omit the server-owned ID."""
+
+    service_id: str | None = None
+    name: str
+    phone_number: str
+
+
+class ServiceDeskConfigurationResponse(BaseModel):
+    """Current persisted routing and retry configuration."""
+
+    revision: int
+    retry_intervals_minutes: list[int]
+    services: list[ServiceDeskServiceRoute]
+    created_at: datetime
+    updated_at: datetime
+
+
+class ServiceDeskConfigurationUpdate(BaseModel):
+    """Full editable configuration replacement."""
+
+    expected_revision: int = Field(ge=1)
+    retry_intervals_minutes: list[RetryIntervalMinutes] = Field(min_length=1, max_length=20)
+    services: list[ServiceDeskServiceRouteUpdate] = Field(min_length=1)

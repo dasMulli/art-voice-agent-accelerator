@@ -118,6 +118,7 @@ class ServiceDeskDispatcher:
         """Expire overdue work and dispatch a bounded batch of due items."""
         await self._rehydrate_active_call_mappings()
         await self._renew_active_call_leases()
+        await self._store.reconcile_intake_disconnects()
         await self._store.expire_overdue()
         dispatched = 0
         for _ in range(_MAX_CLAIMS_PER_POLL):
@@ -142,6 +143,25 @@ class ServiceDeskDispatcher:
                 f"ticket {ticket_id} was not found",
             )
             return False
+        route = await self._store.resolve_work_item_route(work_item, ticket)
+        if route is None:
+            await self._store.release_after_failure(
+                work_item_id,
+                self._worker_id,
+                "configured service route was not found",
+            )
+            return False
+
+        ticket = {
+            **ticket,
+            "service_id": route["service_id"],
+            "affected_service": route["name"],
+        }
+        work_item = {
+            **work_item,
+            "service_id": route["service_id"],
+            "standby_number": route["phone_number"],
+        }
 
         session_id = (
             f"service-desk-{work_item_id}-"
@@ -153,7 +173,7 @@ class ServiceDeskDispatcher:
         try:
             result = await self._lifecycle_handler.start_outbound_call(
                 acs_caller=self._acs_caller,
-                target_number=str(work_item["standby_number"]),
+                target_number=str(route["phone_number"]),
                 redis_mgr=self._redis,
                 browser_session_id=session_id,
             )
@@ -403,9 +423,17 @@ class ServiceDeskDispatcher:
         self._call_mappings.pop(call_id, None)
 
     async def handle_call_disconnected(self, call_id: str, reason: str) -> None:
-        """Requeue an unconfirmed item associated with an ACS disconnect."""
+        """Handle outbound retry or enable follow-up after intake disconnect."""
         mapping = await self._get_call_mapping(call_id)
         if mapping is None:
+            await self._store.record_intake_disconnect(call_id)
+            activated = await self._store.activate_after_intake_disconnect(call_id=call_id)
+            if activated is not None:
+                logger.info(
+                    "Service desk follow-up enabled after intake disconnect | work_item=%s call=%s",
+                    activated.get("work_item_id"),
+                    call_id,
+                )
             return
         await self._store.release_after_disconnect(
             mapping["work_item_id"],

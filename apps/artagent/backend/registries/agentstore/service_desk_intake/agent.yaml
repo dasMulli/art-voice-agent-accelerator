@@ -45,6 +45,7 @@ speech:
 
 tools:
   - lookup_known_caller
+  - list_service_desk_services
   - create_service_desk_ticket
 
 prompts:
