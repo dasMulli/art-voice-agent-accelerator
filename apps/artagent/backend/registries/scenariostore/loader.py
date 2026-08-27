@@ -7,6 +7,7 @@ Loads scenario configurations and applies agent overrides.
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -450,6 +451,8 @@ class ScenarioConfig:
 
 _SCENARIOS: dict[str, ScenarioConfig] = {}
 _SCENARIOS_DIR = Path(__file__).parent
+_SCENARIOS_DISCOVERED = False
+_SCENARIOS_LOCK = threading.RLock()
 
 
 def _load_scenario_file(scenario_dir: Path) -> ScenarioConfig | None:
@@ -476,18 +479,25 @@ def _load_scenario_file(scenario_dir: Path) -> ScenarioConfig | None:
 
 def _discover_scenarios() -> None:
     """Discover and load all scenario configurations."""
-    global _SCENARIOS
+    global _SCENARIOS, _SCENARIOS_DISCOVERED
 
-    if _SCENARIOS:
-        return  # Already loaded
+    if _SCENARIOS_DISCOVERED:
+        return
 
-    for item in _SCENARIOS_DIR.iterdir():
-        if item.is_dir() and not item.name.startswith("_"):
-            scenario = _load_scenario_file(item)
-            if scenario:
-                _SCENARIOS[scenario.name] = scenario
+    with _SCENARIOS_LOCK:
+        if _SCENARIOS_DISCOVERED:
+            return
 
-    logger.info("Discovered %d scenarios", len(_SCENARIOS))
+        discovered: dict[str, ScenarioConfig] = {}
+        for item in _SCENARIOS_DIR.iterdir():
+            if item.is_dir() and not item.name.startswith("_"):
+                scenario = _load_scenario_file(item)
+                if scenario:
+                    discovered[scenario.name] = scenario
+
+        _SCENARIOS = discovered
+        _SCENARIOS_DISCOVERED = True
+        logger.info("Discovered %d scenarios", len(_SCENARIOS))
 
 
 def load_scenario(name: str) -> ScenarioConfig | None:
@@ -501,13 +511,26 @@ def load_scenario(name: str) -> ScenarioConfig | None:
         ScenarioConfig or None if not found
     """
     _discover_scenarios()
-    return _SCENARIOS.get(name)
+    with _SCENARIOS_LOCK:
+        return _SCENARIOS.get(name)
 
 
 def list_scenarios() -> list[str]:
     """List available scenario names."""
     _discover_scenarios()
-    return list(_SCENARIOS.keys())
+    with _SCENARIOS_LOCK:
+        return list(_SCENARIOS.keys())
+
+
+def reload_scenarios() -> list[str]:
+    """Clear and atomically rediscover all scenario configurations."""
+    global _SCENARIOS, _SCENARIOS_DISCOVERED
+
+    with _SCENARIOS_LOCK:
+        _SCENARIOS = {}
+        _SCENARIOS_DISCOVERED = False
+        _discover_scenarios()
+        return list(_SCENARIOS.keys())
 
 
 def get_scenario_agents(
@@ -729,6 +752,7 @@ def get_handoff_instructions(
 __all__ = [
     "load_scenario",
     "list_scenarios",
+    "reload_scenarios",
     "get_scenario_agents",
     "get_scenario_start_agent",
     "get_scenario_template_vars",

@@ -24,6 +24,7 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
@@ -38,6 +39,7 @@ from apps.artagent.backend.config.settings import (
 )
 from apps.artagent.backend.lifecycle.steps import register_agents_step
 from apps.artagent.backend.registries.scenariostore import load_scenario
+from apps.artagent.backend.registries.scenariostore import loader as scenario_loader
 from apps.artagent.backend.voice.shared.config_resolver import (
     resolve_orchestrator_config,
 )
@@ -228,6 +230,147 @@ def test_default_start_agent_matches_default_scenario_start_agent():
     scenario = load_scenario(DEFAULT_AGENT_SCENARIO)
     assert scenario is not None, f"scenario '{DEFAULT_AGENT_SCENARIO}' must exist"
     assert scenario.start_agent == DEFAULT_START_AGENT == SERVICE_DESK_START_AGENT
+
+
+def test_scenario_discovery_does_not_publish_a_partial_registry(monkeypatch):
+    banking_dir = SimpleNamespace(name="banking", is_dir=lambda: True)
+    service_desk_dir = SimpleNamespace(name=SERVICE_DESK_SCENARIO, is_dir=lambda: True)
+    service_desk_loading = threading.Event()
+    release_service_desk = threading.Event()
+    lookup_finished = threading.Event()
+    lookup_result = []
+
+    class _OrderedScenarioDirectory:
+        @staticmethod
+        def iterdir():
+            return iter([banking_dir, service_desk_dir])
+
+    def load_scenario_file(scenario_dir):
+        if scenario_dir == service_desk_dir:
+            service_desk_loading.set()
+            assert release_service_desk.wait(timeout=5)
+        return scenario_loader.ScenarioConfig(
+            name=scenario_dir.name,
+            agents=[DEFAULT_START_AGENT],
+            start_agent=DEFAULT_START_AGENT,
+        )
+
+    monkeypatch.setattr(scenario_loader, "_SCENARIOS", {})
+    monkeypatch.setattr(scenario_loader, "_SCENARIOS_DISCOVERED", False, raising=False)
+    monkeypatch.setattr(scenario_loader, "_SCENARIOS_DIR", _OrderedScenarioDirectory())
+    monkeypatch.setattr(scenario_loader, "_load_scenario_file", load_scenario_file)
+
+    discovery_thread = threading.Thread(target=scenario_loader.list_scenarios)
+    discovery_thread.start()
+    assert service_desk_loading.wait(timeout=5)
+
+    def lookup_service_desk():
+        lookup_result.append(scenario_loader.load_scenario(SERVICE_DESK_SCENARIO))
+        lookup_finished.set()
+
+    lookup_thread = threading.Thread(target=lookup_service_desk)
+    lookup_thread.start()
+    lookup_finished.wait(timeout=0.2)
+    release_service_desk.set()
+
+    discovery_thread.join(timeout=5)
+    lookup_thread.join(timeout=5)
+
+    assert not discovery_thread.is_alive()
+    assert not lookup_thread.is_alive()
+    assert lookup_result == [
+        scenario_loader.ScenarioConfig(
+            name=SERVICE_DESK_SCENARIO,
+            agents=[DEFAULT_START_AGENT],
+            start_agent=DEFAULT_START_AGENT,
+        )
+    ]
+
+
+def test_scenario_registry_can_reload_after_discovery(monkeypatch):
+    scenario_dirs = [SimpleNamespace(name="banking", is_dir=lambda: True)]
+
+    class _MutableScenarioDirectory:
+        @staticmethod
+        def iterdir():
+            return iter(scenario_dirs)
+
+    def load_scenario_file(scenario_dir):
+        return scenario_loader.ScenarioConfig(name=scenario_dir.name)
+
+    monkeypatch.setattr(scenario_loader, "_SCENARIOS", {})
+    monkeypatch.setattr(scenario_loader, "_SCENARIOS_DISCOVERED", False)
+    monkeypatch.setattr(scenario_loader, "_SCENARIOS_DIR", _MutableScenarioDirectory())
+    monkeypatch.setattr(scenario_loader, "_load_scenario_file", load_scenario_file)
+
+    assert scenario_loader.list_scenarios() == ["banking"]
+
+    scenario_dirs[:] = [SimpleNamespace(name=SERVICE_DESK_SCENARIO, is_dir=lambda: True)]
+    scenario_loader.reload_scenarios()
+
+    assert scenario_loader.list_scenarios() == [SERVICE_DESK_SCENARIO]
+
+
+def test_scenario_registry_read_waits_for_concurrent_reload(monkeypatch):
+    banking = scenario_loader.ScenarioConfig(name="banking")
+    service_desk_dir = SimpleNamespace(name=SERVICE_DESK_SCENARIO, is_dir=lambda: True)
+    reader_finished_discovery = threading.Event()
+    release_reader = threading.Event()
+    reload_started_loading = threading.Event()
+    release_reload = threading.Event()
+    reader_completed = threading.Event()
+    reader_result = []
+
+    class _ServiceDeskScenarioDirectory:
+        @staticmethod
+        def iterdir():
+            return iter([service_desk_dir])
+
+    original_discover = scenario_loader._discover_scenarios
+
+    def coordinated_discover():
+        original_discover()
+        if threading.current_thread().name == "scenario-reader":
+            reader_finished_discovery.set()
+            assert release_reader.wait(timeout=5)
+
+    def load_scenario_file(scenario_dir):
+        reload_started_loading.set()
+        assert release_reload.wait(timeout=5)
+        return scenario_loader.ScenarioConfig(name=scenario_dir.name)
+
+    monkeypatch.setattr(scenario_loader, "_SCENARIOS", {"banking": banking})
+    monkeypatch.setattr(scenario_loader, "_SCENARIOS_DISCOVERED", True)
+    monkeypatch.setattr(
+        scenario_loader,
+        "_SCENARIOS_DIR",
+        _ServiceDeskScenarioDirectory(),
+    )
+    monkeypatch.setattr(scenario_loader, "_discover_scenarios", coordinated_discover)
+    monkeypatch.setattr(scenario_loader, "_load_scenario_file", load_scenario_file)
+
+    def read_scenarios():
+        reader_result.extend(scenario_loader.list_scenarios())
+        reader_completed.set()
+
+    reader_thread = threading.Thread(target=read_scenarios, name="scenario-reader")
+    reader_thread.start()
+    assert reader_finished_discovery.wait(timeout=5)
+
+    reload_thread = threading.Thread(target=scenario_loader.reload_scenarios)
+    reload_thread.start()
+    assert reload_started_loading.wait(timeout=5)
+
+    release_reader.set()
+    reader_completed.wait(timeout=0.2)
+    release_reload.set()
+
+    reader_thread.join(timeout=5)
+    reload_thread.join(timeout=5)
+
+    assert not reader_thread.is_alive()
+    assert not reload_thread.is_alive()
+    assert reader_result == [SERVICE_DESK_SCENARIO]
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

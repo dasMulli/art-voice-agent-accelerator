@@ -1298,18 +1298,9 @@ async def reload_scenario_templates(request: Request) -> dict[str, Any]:
     This clears the scenario cache and re-discovers scenarios
     from the scenariostore directory.
     """
-    from apps.artagent.backend.registries.scenariostore.loader import (
-        _SCENARIOS,
-        _discover_scenarios,
-    )
+    from apps.artagent.backend.registries.scenariostore.loader import reload_scenarios
 
-    # Clear the cache
-    _SCENARIOS.clear()
-
-    # Re-discover scenarios
-    _discover_scenarios()
-
-    scenario_names = list_scenarios()
+    scenario_names = reload_scenarios()
 
     logger.info("Scenario templates reloaded | count=%d", len(scenario_names))
 

@@ -28,6 +28,7 @@ from .loader import (
     get_scenario_template_vars,
     list_scenarios,
     load_scenario,
+    reload_scenarios,
 )
 
 __all__ = [
@@ -36,6 +37,7 @@ __all__ = [
     "get_scenario_start_agent",
     "get_scenario_template_vars",
     "list_scenarios",
+    "reload_scenarios",
     "ScenarioConfig",
     "AgentOverride",
 ]
