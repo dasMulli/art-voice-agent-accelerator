@@ -158,7 +158,12 @@ def _find_bash() -> str | None:
     return shutil.which("bash")
 
 
-def _run_sync_appconfig(agent_scenario: str | None) -> list[str]:
+def _run_sync_appconfig(
+    agent_scenario: str | None,
+    *,
+    pass_endpoint_and_label: bool = True,
+    expected_returncode: int = 0,
+) -> list[str]:
     """Run sync-appconfig.sh with stubbed ``az``/``azd`` and return the az calls."""
     bash = _find_bash()
     if bash is None:
@@ -177,7 +182,12 @@ def _run_sync_appconfig(agent_scenario: str | None) -> list[str]:
         )
         # No azd env in a test run: every azd lookup must resolve to empty.
         (bin_dir / "azd").write_text(
-            "#!/usr/bin/env bash\nexit 1\n", encoding="utf-8", newline="\n"
+            "#!/usr/bin/env bash\n"
+            "printf \"ERROR: key not found in environment values: '%s'\\n\" \"${4:-unknown}\"\n"
+            'printf "Suggestion: Run azd env get-values to inspect available keys.\\n"\n'
+            "exit 1\n",
+            encoding="utf-8",
+            newline="\n",
         )
         for stub in ("az", "azd"):
             os.chmod(bin_dir / stub, 0o755)
@@ -188,22 +198,28 @@ def _run_sync_appconfig(agent_scenario: str | None) -> list[str]:
         if agent_scenario is not None:
             env["AGENT_SCENARIO"] = agent_scenario
 
+        command = [bash, SYNC_APPCONFIG_SCRIPT.relative_to(REPO_ROOT).as_posix()]
+        if pass_endpoint_and_label:
+            command.extend(
+                [
+                    "--endpoint",
+                    "https://unit-test.azconfig.io",
+                    "--label",
+                    "unit-test-label",
+                ]
+            )
+
         result = subprocess.run(
-            [
-                bash,
-                SYNC_APPCONFIG_SCRIPT.relative_to(REPO_ROOT).as_posix(),
-                "--endpoint",
-                "https://unit-test.azconfig.io",
-                "--label",
-                "unit-test-label",
-            ],
+            command,
             capture_output=True,
             text=True,
             env=env,
             cwd=REPO_ROOT,
             check=False,
         )
-        assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+        assert result.returncode == expected_returncode, f"{result.stdout}\n{result.stderr}"
+        if expected_returncode:
+            assert "App Config endpoint not set" in f"{result.stdout}\n{result.stderr}"
 
         if not log.exists():
             return []
@@ -584,6 +600,7 @@ def test_appconfig_sync_scenario_key_behaviour(agent_scenario, expect_set, expec
 
     assert bool(scenario_sets) is expect_set, calls
     assert bool(scenario_deletes) is expect_delete, calls
+    assert all("ERROR:" not in call and "Suggestion:" not in call for call in calls)
 
     if expect_set:
         assert f"--value {agent_scenario}" in scenario_sets[0]
@@ -595,6 +612,16 @@ def test_appconfig_sync_scenario_key_behaviour(agent_scenario, expect_set, expec
     for call in calls:
         if "app/agent/scenario" in call and call.startswith("appconfig kv set"):
             assert f"--value {agent_scenario}" in call
+
+
+def test_appconfig_sync_rejects_failed_endpoint_lookup_output():
+    calls = _run_sync_appconfig(
+        None,
+        pass_endpoint_and_label=False,
+        expected_returncode=1,
+    )
+
+    assert calls == []
 
 
 @pytest.mark.parametrize(

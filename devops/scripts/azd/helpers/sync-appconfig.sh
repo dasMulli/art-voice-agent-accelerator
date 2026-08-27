@@ -55,10 +55,14 @@ done
 
 # Get from azd env if not provided
 if [[ -z "$ENDPOINT" ]]; then
-    ENDPOINT=$(azd env get-value AZURE_APPCONFIG_ENDPOINT 2>/dev/null || echo "")
+    if value=$(azd env get-value AZURE_APPCONFIG_ENDPOINT 2>/dev/null); then
+        ENDPOINT="$value"
+    fi
 fi
 if [[ -z "$LABEL" ]]; then
-    LABEL=$(azd env get-value AZURE_ENV_NAME 2>/dev/null || echo "")
+    if value=$(azd env get-value AZURE_ENV_NAME 2>/dev/null); then
+        LABEL="$value"
+    fi
 fi
 
 if [[ -z "$ENDPOINT" ]]; then
@@ -79,7 +83,11 @@ fi
 
 # Helper to get azd env value
 get_azd_value() {
-    azd env get-value "$1" 2>/dev/null || echo ""
+    local value
+    if ! value=$(azd env get-value "$1" 2>/dev/null); then
+        return 0
+    fi
+    printf '%s' "$value"
 }
 
 # Helper to set a key-value in App Config
