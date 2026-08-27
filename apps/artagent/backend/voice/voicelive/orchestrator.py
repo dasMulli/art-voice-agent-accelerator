@@ -33,7 +33,7 @@ Usage:
         conn=voicelive_connection,
         agents=unified_agents,  # dict[str, UnifiedAgent]
         handoff_map=handoff_map,
-        start_agent="Concierge",
+        start_agent="ServiceDeskIntakeAgent",
     )
     await orchestrator.start(system_vars={...})
 """
@@ -47,6 +47,7 @@ from collections import deque
 from typing import TYPE_CHECKING, Any
 
 # Self-contained tool registry (no legacy vlagent dependency)
+from apps.artagent.backend.config.settings import DEFAULT_START_AGENT
 from apps.artagent.backend.registries.toolstore import (
     execute_tool,
     initialize_tools,
@@ -247,7 +248,7 @@ class LiveOrchestrator:
         conn,
         agents: dict[str, UnifiedAgent],
         handoff_map: dict[str, str] | None = None,
-        start_agent: str = "Concierge",
+        start_agent: str = DEFAULT_START_AGENT,
         audio_processor=None,
         messenger=None,
         call_connection_id: str | None = None,

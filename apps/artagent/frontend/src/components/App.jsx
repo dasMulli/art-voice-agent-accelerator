@@ -2625,20 +2625,27 @@ showScenarioConfirmation(scenarioName, currentAgentRef.current);
                        activeSessionProfile?.profile?.contact_info?.email || null;
       const emailParam = userEmail ? `&user_email=${encodeURIComponent(userEmail)}` : '';
       
-      const currentScenario = activeScenarioKey || 'banking';
-      const activeScenarioNameForStart =
-        activeScenarioData?.name ||
-        (currentScenario ? currentScenario.replace(/_/g, ' ') : null);
+      // Only an actual selection counts: the session's active scenario from the
+      // backend, or the sessionStorage mirror kept in sync above. When the user
+      // has not selected one, the `scenario` parameter is omitted entirely so the
+      // backend applies its configured default instead of a hardcoded 'banking'.
+      const selectedScenarioKey =
+        activeScenarioKey || sessionStorage.getItem('voice_agent_active_scenario') || null;
 
       // The scenario is passed as a query parameter on the WebSocket URL.
       // The backend's _create_voice_live_handler already calls
       // set_active_scenario_async with this value when the connection opens,
       // so no separate pre-start POST is needed.
-      const scenarioForQuery = activeScenarioNameForStart || currentScenario;
+      const scenarioForQuery = selectedScenarioKey
+        ? activeScenarioData?.name || selectedScenarioKey.replace(/_/g, ' ')
+        : null;
+      const scenarioParam = scenarioForQuery
+        ? `&scenario=${encodeURIComponent(scenarioForQuery)}`
+        : '';
 
       const baseConversationUrl = `${WS_URL}/api/v1/browser/conversation?session_id=${currentSessionId}&streaming_mode=${encodeURIComponent(
         realtimeMode,
-      )}${emailParam}&scenario=${encodeURIComponent(scenarioForQuery || currentScenario)}`;
+      )}${emailParam}${scenarioParam}`;
       resetMetrics(currentSessionId);
       assistantStreamGenerationRef.current = 0;
       assistantStreamBufferRef.current = { turnId: null, text: "" };

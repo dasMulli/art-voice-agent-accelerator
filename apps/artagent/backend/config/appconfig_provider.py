@@ -203,6 +203,8 @@ APPCONFIG_KEY_MAP: dict[str, str] = {
     "app/mcp/enabled-servers": "MCP_ENABLED_SERVERS",
     # Environment
     "app/environment": "ENVIRONMENT",
+    # Agent scenario selection (optional; absent => backend DEFAULT_AGENT_SCENARIO)
+    "app/agent/scenario": "AGENT_SCENARIO",
     # Application URLs (set by postprovision)
     "app/backend/base-url": "BASE_URL",
     "app/frontend/backend-url": "VITE_BACKEND_BASE_URL",

@@ -14,6 +14,8 @@ from pathlib import Path
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from apps.artagent.backend.config.settings import DEFAULT_START_AGENT
+
 _PROJECT_ROOT = Path(__file__).resolve().parents[5]
 _ENV_FILE = _PROJECT_ROOT / ".env"
 # Agents are now in apps/artagent/backend/registries/agentstore/
@@ -48,7 +50,9 @@ class VoiceLiveSettings(BaseSettings):
     azure_client_secret: str | None = Field(default=None, description="Azure AD client secret")
 
     # Application Configuration
-    start_agent: str = Field(default="Concierge", description="Initial agent to start with")
+    start_agent: str = Field(
+        default=DEFAULT_START_AGENT, description="Initial agent to start with"
+    )
     agents_dir: str = Field(
         default=str(_AGENTSTORE_DIR),
         description="Directory containing agent YAML files (registries/agentstore)",

@@ -17,7 +17,7 @@ Usage:
         OrchestratorConfigResult,
     )
 
-    # Resolve config (will use scenario if AGENT_SCENARIO is set)
+    # Resolve config (uses AGENT_SCENARIO when set, else DEFAULT_AGENT_SCENARIO)
     config = resolve_orchestrator_config()
 
     # Use resolved values
@@ -30,7 +30,6 @@ Usage:
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -46,15 +45,17 @@ except ImportError:
 
     logger = logging.getLogger("voice.shared.config_resolver")
 
+from apps.artagent.backend.config.settings import (
+    DEFAULT_AGENT_SCENARIO,
+    DEFAULT_START_AGENT,
+    get_agent_scenario,
+)
 from apps.artagent.backend.src.orchestration.naming import agent_key, find_agent_by_name
 
 
 # ─────────────────────────────────────────────────────────────────────
 # Default Configuration
 # ─────────────────────────────────────────────────────────────────────
-
-# Unified default start agent name (used by both adapters)
-DEFAULT_START_AGENT = "BankingConcierge"
 
 # Environment variable for scenario selection
 SCENARIO_ENV_VAR = "AGENT_SCENARIO"
@@ -209,12 +210,14 @@ def resolve_orchestrator_config(
     Resolution order:
     1. Explicit parameters (if provided)
     2. Session-scoped scenario (if session_id is provided and session has an active scenario)
-    3. Scenario configuration (if AGENT_SCENARIO env var is set)
+    3. Scenario configuration (``scenario_name`` argument, else the ``AGENT_SCENARIO``
+       operator override, else :data:`DEFAULT_AGENT_SCENARIO`)
     4. Default values
 
     Args:
         session_id: Optional session ID to check for session-scoped scenarios
-        scenario_name: Override scenario name (defaults to AGENT_SCENARIO env var)
+        scenario_name: Override scenario name (defaults to AGENT_SCENARIO env var,
+            then DEFAULT_AGENT_SCENARIO)
         start_agent: Override start agent (defaults to scenario or DEFAULT_START_AGENT)
         agents: Override agent registry (defaults to scenario-aware loading)
         handoff_map: Override handoff map (defaults to building from agents)
@@ -317,8 +320,10 @@ def resolve_orchestrator_config(
         
         return result
 
-    # Determine scenario name from parameter or environment
-    effective_scenario = scenario_name or os.getenv(SCENARIO_ENV_VAR, "").strip()
+    # Determine scenario name from parameter, operator override, or the
+    # shipped default. ``get_agent_scenario`` never returns an empty string, so
+    # a scenario is always resolved unless an explicit caller passes one.
+    effective_scenario = scenario_name or get_agent_scenario()
 
     if effective_scenario:
         # Load scenario
@@ -467,6 +472,7 @@ def resolve_from_app_state(app_state: Any) -> OrchestratorConfigResult:
 
 
 __all__ = [
+    "DEFAULT_AGENT_SCENARIO",
     "DEFAULT_START_AGENT",
     "SCENARIO_ENV_VAR",
     "OrchestratorConfigResult",

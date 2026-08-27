@@ -188,6 +188,39 @@ ACS_AUDIENCE = os.getenv("ACS_AUDIENCE", "")  # ACS Immutable Resource ID
 
 
 # ==============================================================================
+# AGENT SCENARIO
+# ==============================================================================
+# The active scenario decides which agents are loaded and which one answers an
+# inbound call. Operators override it with AGENT_SCENARIO (container env var,
+# .env.local, or the Azure App Configuration key ``app/agent/scenario``).
+# Without an override the shipped default applies to every surface: startup,
+# readiness reporting, PSTN calls, and browser sessions.
+# ==============================================================================
+
+DEFAULT_AGENT_SCENARIO: str = "service_desk"
+
+# Start agent used when no scenario can be loaded. Must match the ``start_agent``
+# of DEFAULT_AGENT_SCENARIO so startup, readiness reporting and live calls agree.
+DEFAULT_START_AGENT: str = "ServiceDeskIntakeAgent"
+
+
+def get_agent_scenario() -> str:
+    """Resolve the scenario name that is active for this process.
+
+    ``AGENT_SCENARIO`` is read at call time so values injected by Azure App
+    Configuration after module import are honoured. An explicit override always
+    wins; the built-in default only applies when no override is present.
+
+    Returns:
+        Scenario name, never empty.
+    """
+    return os.getenv("AGENT_SCENARIO", "").strip() or DEFAULT_AGENT_SCENARIO
+
+
+AGENT_SCENARIO: str = get_agent_scenario()
+
+
+# ==============================================================================
 # AZURE STORAGE & COSMOS DB
 # ==============================================================================
 

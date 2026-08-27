@@ -1160,6 +1160,10 @@ async def _check_rt_agents_fast(app_state: Any) -> ServiceCheck:
         start_agent = getattr(app_state, "start_agent", None)
         handoff_map = getattr(app_state, "handoff_map", {}) or {}
         summaries = getattr(app_state, "agent_summaries", None)
+        scenario = getattr(app_state, "scenario", None)
+        scenario_name = getattr(app_state, "scenario_name", None) or getattr(
+            scenario, "name", None
+        )
 
         if summaries is None and unified_agents:
             summaries = build_agent_summaries(unified_agents)
@@ -1198,6 +1202,8 @@ async def _check_rt_agents_fast(app_state: Any) -> ServiceCheck:
             if len(agent_names) > 5:
                 preview += ", …"
             detail_parts.append(f"names: {preview}")
+        if scenario_name:
+            detail_parts.append(f"scenario={scenario_name}")
         if start_agent:
             detail_parts.append(f"start_agent={start_agent}")
         if handoff_map:

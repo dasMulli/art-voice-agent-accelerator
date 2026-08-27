@@ -10,6 +10,8 @@ from __future__ import annotations
 import os
 from typing import TYPE_CHECKING
 
+from apps.artagent.backend.config.settings import DEFAULT_START_AGENT
+
 if TYPE_CHECKING:
     from fastapi import FastAPI
 
@@ -151,7 +153,7 @@ def build_startup_dashboard(
     # Scenario info
     scenario = getattr(app.state, "scenario", None)
     if scenario:
-        start_agent = getattr(app.state, "start_agent", "Concierge")
+        start_agent = getattr(app.state, "start_agent", DEFAULT_START_AGENT)
         lines.append(f"  Scenario     {scenario.name} (start: {start_agent})")
         lines.append("")
 

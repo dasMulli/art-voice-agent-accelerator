@@ -397,6 +397,10 @@ async def _hydrate_phrases_from_cosmos(app: FastAPI) -> None:
 
 def register_agents_step(manager: LifecycleManager, app: FastAPI) -> None:
     """Register the agent loading step."""
+    from apps.artagent.backend.config.settings import (
+        DEFAULT_START_AGENT,
+        get_agent_scenario,
+    )
     from apps.artagent.backend.registries.agentstore.loader import (
         build_agent_summaries,
         build_handoff_map,
@@ -404,27 +408,28 @@ def register_agents_step(manager: LifecycleManager, app: FastAPI) -> None:
     )
 
     async def start() -> None:
-        scenario_name = os.getenv("AGENT_SCENARIO", "").strip()
+        # ``get_agent_scenario`` honours an explicit AGENT_SCENARIO override and
+        # otherwise returns the shipped default, so startup, readiness reporting
+        # and live calls all resolve the same scenario.
+        scenario_name = get_agent_scenario()
 
-        if scenario_name:
-            # Load scenario-based configuration
-            from apps.artagent.backend.registries.scenariostore import (
-                get_scenario_agents,
-                get_scenario_start_agent,
-                load_scenario,
-            )
+        # Load scenario-based configuration
+        from apps.artagent.backend.registries.scenariostore import (
+            get_scenario_agents,
+            get_scenario_start_agent,
+            load_scenario,
+        )
 
-            scenario = load_scenario(scenario_name)
-            if scenario:
-                unified_agents = get_scenario_agents(scenario_name)
-                start_agent = get_scenario_start_agent(scenario_name) or "Concierge"
-                app.state.scenario = scenario
-                app.state.start_agent = start_agent
-                app.state.scenario_handoff_map = scenario.build_handoff_map()
-            else:
-                logger.warning(f"Scenario '{scenario_name}' not found, using defaults")
-                unified_agents = discover_agents()
+        scenario = load_scenario(scenario_name)
+        if scenario:
+            unified_agents = get_scenario_agents(scenario_name)
+            start_agent = get_scenario_start_agent(scenario_name) or DEFAULT_START_AGENT
+            app.state.scenario = scenario
+            app.state.scenario_name = scenario_name
+            app.state.start_agent = start_agent
+            app.state.scenario_handoff_map = scenario.build_handoff_map()
         else:
+            logger.warning(f"Scenario '{scenario_name}' not found, using defaults")
             unified_agents = discover_agents()
 
         # Build handoff map
@@ -442,8 +447,16 @@ def register_agents_step(manager: LifecycleManager, app: FastAPI) -> None:
         app.state.handoff_map = handoff_map
         app.state.agent_summaries = build_agent_summaries(unified_agents)
 
-        if not hasattr(app.state, "start_agent"):
-            app.state.start_agent = "Concierge"
+        if not getattr(app.state, "start_agent", None):
+            app.state.start_agent = DEFAULT_START_AGENT
+
+        logger.info(
+            "Agents loaded | scenario=%s start_agent=%s agents=%d handoffs=%d",
+            scenario_name if scenario else "(none)",
+            app.state.start_agent,
+            len(unified_agents),
+            len(handoff_map),
+        )
 
     manager.add_step("agents", start)
 

@@ -5,8 +5,38 @@ confirmation calls.
 
 ## Select the scenario
 
-Choose **service_desk** in the scenario selector. For deployments that use the
-existing global scenario setting, set `AGENT_SCENARIO=service_desk`.
+`service_desk` is the shipped default scenario: with no override, startup, the
+readiness report, inbound PSTN calls, and browser sessions all begin with
+`ServiceDeskIntakeAgent`.
+
+To run a different scenario, set an explicit override — it always wins over the
+default:
+
+- Local: `AGENT_SCENARIO=banking` in `.env.local` (or the process environment).
+- Deployed (durable): `azd` / ambient `AGENT_SCENARIO` is the durable source of
+  truth that postprovision reconciliation uses. Set a durable override with
+  `azd env set AGENT_SCENARIO banking`, then run `azd provision` or the
+  equivalent postprovision/sync step for your deployment so
+  `sync-appconfig.sh` writes the Azure App Configuration key
+  `app/agent/scenario`.
+- Restore the shipped default in a deployed environment: current
+  `azd env --help` exposes `azd env set` but no `azd env unset`, so either
+  remove `AGENT_SCENARIO` from the azd environment file you manage directly or
+  run `azd env set AGENT_SCENARIO ""`. On the next `azd provision` /
+  postprovision sync, `sync-appconfig.sh` treats the value as unset and deletes
+  `app/agent/scenario`, which restores the shipped `service_desk` default and
+  prevents stale overrides from surviving.
+- Deployed (advanced temporary/manual override): you can set App Configuration
+  directly with
+  `az appconfig kv set --name <appconfig-name> --auth-mode login --label <env> --key app/agent/scenario --value banking`
+  for immediate runtime/restart testing. This is not co-equal durable
+  configuration: the next `azd provision` / postprovision sync reconciles the
+  key back to the azd/ambient `AGENT_SCENARIO` value (or deletes it when that
+  durable value is unset/blank). App Configuration is read at startup, so
+  restart the backend revision after either change.
+- Per session: choose a scenario in the scenario selector. A session-scoped
+  selection takes precedence over both the override and the default for that
+  session only.
 
 Inbound calls use `ServiceDeskIntakeAgent`, the scenario's `start_agent`.
 Generated outbound confirmation calls must use the same scenario and explicitly

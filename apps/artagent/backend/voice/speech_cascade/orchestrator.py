@@ -26,7 +26,7 @@ Usage:
 
     # Create with unified agents
     adapter = CascadeOrchestratorAdapter.create(
-        start_agent="Concierge",
+        start_agent="ServiceDeskIntakeAgent",
         call_connection_id="call_123",
         session_id="session_456",
     )
@@ -210,7 +210,8 @@ class CascadeConfig:
     Configuration for CascadeOrchestratorAdapter.
 
     Attributes:
-        start_agent: Name of the initial agent
+        start_agent: Name of the initial agent. ``None`` means "not chosen by the
+            caller" and lets the active scenario decide.
         model_name: LLM deployment name (from AZURE_OPENAI_DEPLOYMENT)
         call_connection_id: ACS call connection for tracing
         session_id: Session identifier for tracing
@@ -218,7 +219,7 @@ class CascadeConfig:
         streaming: Whether to stream responses (default False for sentence-level TTS)
     """
 
-    start_agent: str = DEFAULT_START_AGENT
+    start_agent: str | None = None
     model_name: str = field(default_factory=lambda: DEFAULT_MODEL_NAME)
     call_connection_id: str | None = None
     session_id: str | None = None
@@ -282,12 +283,6 @@ class CascadeOrchestratorAdapter:
 
     def __post_init__(self):
         """Initialize agent registry if not provided."""
-        # Initialize metrics tracker
-        self._metrics = OrchestratorMetrics(
-            agent_name=self.config.start_agent or "",
-            call_connection_id=self.config.call_connection_id,
-            session_id=self.config.session_id,
-        )
         # Per-turn LLM time-to-first-token (ms), populated during streaming.
         self._last_turn_ttft_ms: float | None = None
         # perf_counter at turn entry (== finalized user input / recognition
@@ -309,7 +304,7 @@ class CascadeOrchestratorAdapter:
             self._build_handoff_map()
 
         if not self._active_agent:
-            self._active_agent = self.config.start_agent
+            self._active_agent = self.config.start_agent or DEFAULT_START_AGENT
 
         # Validate start agent exists (case-insensitive)
         if self._active_agent:
@@ -327,6 +322,13 @@ class CascadeOrchestratorAdapter:
                 # Normalize to actual key
                 self._active_agent = actual_key
 
+        # Initialize metrics tracker once the effective agent is known.
+        self._metrics = OrchestratorMetrics(
+            agent_name=self._active_agent or "",
+            call_connection_id=self.config.call_connection_id,
+            session_id=self.config.session_id,
+        )
+
     def _load_agents(self) -> None:
         """Load agents from the unified agent registry with scenario support."""
         # Use cached orchestrator config (this also populates the cache for future use)
@@ -334,8 +336,10 @@ class CascadeOrchestratorAdapter:
         self.agents = config.agents
         self.handoff_map = config.handoff_map
 
-        # Update start agent if scenario specifies one
-        if config.has_scenario and config.start_agent:
+        # Update start agent if scenario specifies one. An explicitly requested
+        # start agent always wins: the scenario only fills the gap when the
+        # caller did not choose.
+        if config.has_scenario and config.start_agent and not self.config.start_agent:
             self.config.start_agent = config.start_agent
             self._active_agent = config.start_agent
 
@@ -368,7 +372,7 @@ class CascadeOrchestratorAdapter:
     def create(
         cls,
         *,
-        start_agent: str = "Concierge",
+        start_agent: str | None = None,
         model_name: str | None = None,
         call_connection_id: str | None = None,
         session_id: str | None = None,
@@ -381,7 +385,8 @@ class CascadeOrchestratorAdapter:
         Factory method to create a fully configured adapter.
 
         Args:
-            start_agent: Initial agent name
+            start_agent: Initial agent name. ``None`` defers to the active
+                scenario (``AGENT_SCENARIO`` override or the default scenario).
             model_name: LLM deployment name (defaults to AZURE_OPENAI_DEPLOYMENT)
             call_connection_id: ACS call ID for tracing
             session_id: Session ID for tracing

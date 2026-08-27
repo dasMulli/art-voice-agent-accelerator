@@ -80,7 +80,10 @@ from apps.artagent.backend.voice.messaging import (
 # Orchestration imports - session_agents OK, route_turn imported lazily to avoid circular
 from apps.artagent.backend.src.orchestration.session_agents import get_session_agent
 from apps.artagent.backend.src.orchestration.naming import find_agent_by_name
-from apps.artagent.backend.voice.shared.config_resolver import resolve_orchestrator_config
+from apps.artagent.backend.voice.shared.config_resolver import (
+    DEFAULT_START_AGENT,
+    resolve_orchestrator_config,
+)
 from apps.artagent.backend.voice.shared.terminal_action import TerminalAction
 
 # Pool management
@@ -575,7 +578,7 @@ class VoiceHandler:
         memo = self._context.memo_manager
         active_agent_name = (
             memo.get_value_from_corememory("active_agent") if memo else None
-        ) or getattr(self._app_state, "start_agent", "Concierge")
+        ) or getattr(self._app_state, "start_agent", DEFAULT_START_AGENT)
 
         # Session-scoped agent carries the live overrides applied to this call.
         session_agent = None
@@ -1710,7 +1713,7 @@ class VoiceHandler:
                 start_agent_name,
             )
         else:
-            start_agent_name = getattr(self._app_state, "start_agent", "Concierge")
+            start_agent_name = getattr(self._app_state, "start_agent", DEFAULT_START_AGENT)
             logger.info(
                 "[%s] Session initialized with default agent: %s",
                 session_short,
@@ -1757,7 +1760,9 @@ class VoiceHandler:
 
         # Fall back to unified agents
         unified_agents = getattr(app_state, "unified_agents", {})
-        start_agent_name = active_agent_name or getattr(app_state, "start_agent", "Concierge")
+        start_agent_name = active_agent_name or getattr(
+            app_state, "start_agent", DEFAULT_START_AGENT
+        )
         # Use case-insensitive lookup
         _, start_agent = find_agent_by_name(unified_agents, start_agent_name)
 

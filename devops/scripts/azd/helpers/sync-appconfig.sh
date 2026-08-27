@@ -119,6 +119,42 @@ set_kv() {
     fi
 }
 
+# Helper to delete a key-value from App Config (idempotent).
+# Removing a key is how an override is cleared: absent key == backend default.
+delete_kv() {
+    local key="$1"
+
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log "  [DRY-RUN] delete $key"
+        return 0
+    fi
+
+    local cmd_args=(
+        --endpoint "$ENDPOINT"
+        --key "$key"
+        --auth-mode login
+        --yes
+        --output none
+    )
+    [[ -n "$LABEL" ]] && cmd_args+=(--label "$LABEL")
+
+    local error_output
+    if error_output=$(az appconfig kv delete "${cmd_args[@]}" 2>&1); then
+        return 0
+    fi
+
+    # A missing key is already the desired end state - not an error.
+    if echo "$error_output" | grep -qiE 'not found|no key-value|does not exist|KeyNotFound|\(404\)'; then
+        return 0
+    fi
+
+    fail "Failed to delete key: $key"
+    local error_msg
+    error_msg=$(echo "$error_output" | head -3)
+    [[ -n "$error_msg" ]] && log "  └─ Error: $error_msg"
+    return 1
+}
+
 # Helper to get existing App Config value (for preserving values not in azd env)
 get_appconfig_value() {
     local key="$1"
@@ -288,6 +324,28 @@ fi
 
 # Environment metadata
 set_kv "app/environment" "$(get_azd_value AZURE_ENV_NAME)" && ((++count)) || errors+=("app/environment")
+
+# Agent scenario (OPTIONAL operator override).
+# Deployed environments treat azd/ambient AGENT_SCENARIO as the durable source
+# of truth. This sync reconciles that durable value into App Configuration; a
+# manual `az appconfig kv set --key app/agent/scenario ...` may work immediately
+# but is temporary and will be overwritten (or deleted) by the next sync. A
+# scenario is never hardcoded here. When no durable override is set, any
+# previously written key is DELETED for this label so a stale manual or old azd
+# value cannot survive while the deployment reports that the backend default
+# applies.
+agent_scenario="${AGENT_SCENARIO:-$(get_azd_value AGENT_SCENARIO)}"
+if [[ -n "$agent_scenario" ]]; then
+    info "Reconciling durable AGENT_SCENARIO override into App Config: $agent_scenario"
+    set_kv "app/agent/scenario" "$agent_scenario" && ((++count)) || errors+=("app/agent/scenario")
+else
+    info "No durable AGENT_SCENARIO override set; deleting app/agent/scenario so the shipped backend default applies"
+    if delete_kv "app/agent/scenario"; then
+        log "  └─ app/agent/scenario is absent for label ${LABEL:-<none>}"
+    else
+        errors+=("app/agent/scenario")
+    fi
+fi
 
 # Sentinel for refresh trigger
 set_kv "app/sentinel" "v$(date +%s)" && ((++count)) || errors+=("app/sentinel")

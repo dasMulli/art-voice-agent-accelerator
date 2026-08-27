@@ -36,6 +36,7 @@ from opentelemetry.trace import SpanKind
 from utils.ml_logging import get_logger
 from utils.telemetry_decorators import add_speech_tts_metrics, trace_speech
 
+from apps.artagent.backend.config.settings import DEFAULT_START_AGENT
 from apps.artagent.backend.src.orchestration.naming import find_agent_by_name
 from apps.artagent.backend.src.orchestration.session_agents import get_session_agent
 
@@ -228,7 +229,7 @@ class TTSPlayback:
         # under the agent's *own* name, which may differ from app_state.start_agent
         # (e.g. when a scenario is active). Without this fallback the override's
         # voice silently never applies.
-        start_agent_name = getattr(self._app_state, "start_agent", "Concierge")
+        start_agent_name = getattr(self._app_state, "start_agent", DEFAULT_START_AGENT)
         session_agent = get_session_agent(self._context.session_id, start_agent_name)
         if session_agent is None:
             session_agent = get_session_agent(self._context.session_id)
