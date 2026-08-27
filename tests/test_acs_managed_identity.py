@@ -1,84 +1,33 @@
-"""
-Tests for ACS managed identity authentication.
-
-Validates that Call Automation, Email (ECS), and SMS clients correctly
-prefer managed identity when an endpoint is configured and the env-var
-override / auto-detect heuristic allows it, while still honoring connection
-strings as a fallback for local development.
-"""
+"""Tests for Azure Communication Services authentication behavior."""
 
 from __future__ import annotations
 
-import importlib
-import sys
+import os
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+# Imported at module scope so module initialization always happens before a test
+# mutates the environment. This keeps every case order- and process-independent.
+from src.acs import email_service as email_mod
+from src.acs import sms_service as sms_mod
 
-# ---------------------------------------------------------------------------
-# utils.azure_auth.should_use_managed_identity_for_acs
-# ---------------------------------------------------------------------------
-
-
-def test_should_use_mi_explicit_true(monkeypatch):
-    from utils.azure_auth import should_use_managed_identity_for_acs
-
-    monkeypatch.setenv("ACS_USE_MANAGED_IDENTITY", "true")
-    monkeypatch.delenv("AZURE_CLIENT_ID", raising=False)
-    monkeypatch.delenv("MSI_ENDPOINT", raising=False)
-    monkeypatch.delenv("IDENTITY_ENDPOINT", raising=False)
-
-    assert should_use_managed_identity_for_acs() is True
-
-
-def test_should_use_mi_explicit_false(monkeypatch):
-    from utils.azure_auth import should_use_managed_identity_for_acs
-
-    monkeypatch.setenv("ACS_USE_MANAGED_IDENTITY", "false")
-    monkeypatch.setenv("AZURE_CLIENT_ID", "00000000-0000-0000-0000-000000000000")
-
-    assert should_use_managed_identity_for_acs() is False
-
-
-def test_should_use_mi_autodetect_in_azure(monkeypatch):
-    from utils.azure_auth import should_use_managed_identity_for_acs
-
-    monkeypatch.delenv("ACS_USE_MANAGED_IDENTITY", raising=False)
-    monkeypatch.setenv("AZURE_CLIENT_ID", "00000000-0000-0000-0000-000000000000")
-
-    assert should_use_managed_identity_for_acs() is True
-
-
-def test_should_use_mi_autodetect_local(monkeypatch):
-    from utils.azure_auth import should_use_managed_identity_for_acs
-
-    monkeypatch.delenv("ACS_USE_MANAGED_IDENTITY", raising=False)
-    monkeypatch.delenv("AZURE_CLIENT_ID", raising=False)
-    monkeypatch.delenv("MSI_ENDPOINT", raising=False)
-    monkeypatch.delenv("IDENTITY_ENDPOINT", raising=False)
-
-    assert should_use_managed_identity_for_acs() is False
-
-
-# ---------------------------------------------------------------------------
-# src.acs.acs_helper.AcsCaller — prefers MI when endpoint is provided.
-# ---------------------------------------------------------------------------
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 @pytest.fixture
 def stub_credential(monkeypatch):
-    cred = SimpleNamespace(name="stub-credential")
-    monkeypatch.setattr("src.acs.acs_helper.get_credential", lambda: cred)
-    return cred
+    """Replace Call Automation credential construction with a stable test value."""
+    credential = SimpleNamespace(name="stub-credential")
+    monkeypatch.setattr("src.acs.acs_helper.get_credential", lambda: credential)
+    return credential
 
 
-def test_acs_caller_prefers_managed_identity_when_endpoint_set(
+def test_acs_caller_entra_auth_uses_endpoint_when_connection_string_exists(
     monkeypatch, stub_credential
 ):
-    """When endpoint + MI override are present, MI wins over connection string."""
-    monkeypatch.setenv("ACS_USE_MANAGED_IDENTITY", "true")
-
+    """Explicit Entra auth takes precedence over a local connection string."""
     captured = {}
 
     class StubCallAutomationClient:
@@ -88,9 +37,8 @@ def test_acs_caller_prefers_managed_identity_when_endpoint_set(
             captured["credential"] = credential
 
         @classmethod
-        def from_connection_string(cls, conn_str):
-            captured["mode"] = "conn_string"
-            captured["conn_str"] = conn_str
+        def from_connection_string(cls, connection_string):
+            captured["mode"] = "connection_string"
             return cls()
 
     monkeypatch.setattr("src.acs.acs_helper.CallAutomationClient", StubCallAutomationClient)
@@ -102,249 +50,311 @@ def test_acs_caller_prefers_managed_identity_when_endpoint_set(
         callback_url="https://example.test/api/cb",
         acs_connection_string="endpoint=https://x.communication.azure.com/;accesskey=key",
         acs_endpoint="https://x.communication.azure.com/",
+        acs_auth_mode="entra",
     )
 
-    assert captured["mode"] == "credential"
-    assert captured["endpoint"] == "https://x.communication.azure.com/"
-    assert captured["credential"] is stub_credential
+    assert captured == {
+        "mode": "credential",
+        "endpoint": "https://x.communication.azure.com/",
+        "credential": stub_credential,
+    }
 
 
-def test_acs_caller_falls_back_to_connection_string_when_mi_disabled(
-    monkeypatch, stub_credential
-):
-    """With MI explicitly disabled, connection string is used even if endpoint is set."""
-    monkeypatch.setenv("ACS_USE_MANAGED_IDENTITY", "false")
-
+def test_acs_caller_auto_uses_connection_string(monkeypatch, stub_credential):
+    """Auto mode preserves local connection-string authentication."""
     captured = {}
 
     class StubCallAutomationClient:
-        def __init__(self, endpoint=None, credential=None):
-            captured["mode"] = "credential"
-
         @classmethod
-        def from_connection_string(cls, conn_str):
-            captured["mode"] = "conn_string"
-            captured["conn_str"] = conn_str
+        def from_connection_string(cls, connection_string):
+            captured["connection_string"] = connection_string
             return cls.__new__(cls)
 
     monkeypatch.setattr("src.acs.acs_helper.CallAutomationClient", StubCallAutomationClient)
 
     from src.acs.acs_helper import AcsCaller
 
-    AcsCaller(
+    caller = AcsCaller(
         source_number="+15555550100",
         callback_url="https://example.test/api/cb",
         acs_connection_string="endpoint=https://x.communication.azure.com/;accesskey=key",
         acs_endpoint="https://x.communication.azure.com/",
+        acs_auth_mode="auto",
     )
 
-    assert captured["mode"] == "conn_string"
+    assert caller.effective_auth_mode == "connection_string"
+    assert captured["connection_string"].endswith("accesskey=key")
 
 
-def test_acs_caller_uses_mi_when_only_endpoint_provided(monkeypatch, stub_credential):
-    """No connection string + endpoint => MI even with override absent."""
-    monkeypatch.delenv("ACS_USE_MANAGED_IDENTITY", raising=False)
-
+def test_acs_caller_auto_uses_entra_when_only_endpoint_is_available(monkeypatch, stub_credential):
     captured = {}
 
     class StubCallAutomationClient:
         def __init__(self, endpoint=None, credential=None):
-            captured["mode"] = "credential"
             captured["endpoint"] = endpoint
+            captured["credential"] = credential
 
     monkeypatch.setattr("src.acs.acs_helper.CallAutomationClient", StubCallAutomationClient)
 
     from src.acs.acs_helper import AcsCaller
 
-    AcsCaller(
+    caller = AcsCaller(
         source_number="+15555550100",
         callback_url="https://example.test/api/cb",
         acs_endpoint="https://x.communication.azure.com/",
+        acs_auth_mode="auto",
     )
 
-    assert captured["mode"] == "credential"
+    assert caller.effective_auth_mode == "entra"
     assert captured["endpoint"] == "https://x.communication.azure.com/"
+    assert captured["credential"] is stub_credential
 
 
-# ---------------------------------------------------------------------------
-# src.acs.email_service.EmailService — ECS data plane uses ACS endpoint + MI.
-# ---------------------------------------------------------------------------
+def _clear_service_auth_environment(monkeypatch, *, sender_variable: str):
+    for name in (
+        "ACS_AUTH_MODE",
+        "ACS_CONNECTION_STRING",
+        "ACS_ENDPOINT",
+        "AZURE_COMMUNICATION_EMAIL_CONNECTION_STRING",
+        "AZURE_COMMUNICATION_SMS_CONNECTION_STRING",
+        sender_variable,
+    ):
+        monkeypatch.delenv(name, raising=False)
 
 
-def _reload_email_module():
-    """Reload email_service after env var changes so module-level globals refresh."""
-    sys.modules.pop("src.acs.email_service", None)
-    return importlib.import_module("src.acs.email_service")
-
-
-def test_email_service_prefers_managed_identity(monkeypatch):
-    monkeypatch.setenv("ACS_USE_MANAGED_IDENTITY", "true")
+def test_email_service_entra_auth_takes_precedence(monkeypatch):
+    _clear_service_auth_environment(monkeypatch, sender_variable="AZURE_EMAIL_SENDER_ADDRESS")
+    monkeypatch.setenv("ACS_AUTH_MODE", "entra")
     monkeypatch.setenv("ACS_ENDPOINT", "https://x.communication.azure.com/")
     monkeypatch.setenv("AZURE_EMAIL_SENDER_ADDRESS", "noreply@example.com")
     monkeypatch.setenv(
         "AZURE_COMMUNICATION_EMAIL_CONNECTION_STRING",
         "endpoint=https://x.communication.azure.com/;accesskey=key",
     )
-
-    email_mod = _reload_email_module()
-
     captured = {}
+    credential = SimpleNamespace(name="stub-credential")
 
     class StubEmailClient:
-        def __init__(self, endpoint, credential):
-            captured["mode"] = "credential"
+        def __init__(self, endpoint, supplied_credential):
             captured["endpoint"] = endpoint
-            captured["credential"] = credential
+            captured["credential"] = supplied_credential
 
         @classmethod
-        def from_connection_string(cls, conn_str):
-            captured["mode"] = "conn_string"
-            return cls("x", "y")
+        def from_connection_string(cls, connection_string):
+            captured["connection_string"] = connection_string
+            return cls.__new__(cls)
 
-    stub_cred = SimpleNamespace(name="stub-credential")
-    monkeypatch.setattr(email_mod, "EmailClient", StubEmailClient)
-    monkeypatch.setattr(email_mod, "get_credential", lambda: stub_cred)
     monkeypatch.setattr(email_mod, "AZURE_EMAIL_AVAILABLE", True)
+    monkeypatch.setattr(email_mod, "EmailClient", StubEmailClient)
+    monkeypatch.setattr(email_mod, "get_credential", lambda: credential)
 
     service = email_mod.EmailService()
 
-    assert captured["mode"] == "credential"
-    assert captured["endpoint"] == "https://x.communication.azure.com/"
-    assert captured["credential"] is stub_cred
+    assert service.effective_auth_mode == "entra"
+    assert captured == {
+        "endpoint": "https://x.communication.azure.com/",
+        "credential": credential,
+    }
     assert service.is_configured() is True
 
 
-def test_email_service_uses_connection_string_when_mi_disabled(monkeypatch):
-    monkeypatch.setenv("ACS_USE_MANAGED_IDENTITY", "false")
+def test_email_service_auto_prefers_connection_string(monkeypatch):
+    _clear_service_auth_environment(monkeypatch, sender_variable="AZURE_EMAIL_SENDER_ADDRESS")
+    monkeypatch.setenv("ACS_AUTH_MODE", "auto")
     monkeypatch.setenv("ACS_ENDPOINT", "https://x.communication.azure.com/")
     monkeypatch.setenv("AZURE_EMAIL_SENDER_ADDRESS", "noreply@example.com")
-    monkeypatch.setenv(
-        "AZURE_COMMUNICATION_EMAIL_CONNECTION_STRING",
-        "endpoint=https://x.communication.azure.com/;accesskey=key",
-    )
-
-    email_mod = _reload_email_module()
-
+    monkeypatch.setenv("ACS_CONNECTION_STRING", "endpoint=https://x;accesskey=key")
     captured = {}
 
     class StubEmailClient:
-        def __init__(self, endpoint, credential):
-            captured["mode"] = "credential"
-
         @classmethod
-        def from_connection_string(cls, conn_str):
-            captured["mode"] = "conn_string"
-            captured["conn_str"] = conn_str
+        def from_connection_string(cls, connection_string):
+            captured["connection_string"] = connection_string
             return cls.__new__(cls)
 
+    monkeypatch.setattr(email_mod, "AZURE_EMAIL_AVAILABLE", True)
     monkeypatch.setattr(email_mod, "EmailClient", StubEmailClient)
+
+    service = email_mod.EmailService()
+
+    assert service.effective_auth_mode == "connection_string"
+    assert captured["connection_string"].endswith("accesskey=key")
+    assert service.is_configured() is True
+
+
+def test_email_service_entra_requires_endpoint(monkeypatch):
+    _clear_service_auth_environment(monkeypatch, sender_variable="AZURE_EMAIL_SENDER_ADDRESS")
+    monkeypatch.setenv("ACS_AUTH_MODE", "entra")
     monkeypatch.setattr(email_mod, "AZURE_EMAIL_AVAILABLE", True)
 
-    email_mod.EmailService()
-
-    assert captured["mode"] == "conn_string"
-
-
-# ---------------------------------------------------------------------------
-# src.acs.sms_service.SmsService — MI support (new behavior).
-# ---------------------------------------------------------------------------
+    with pytest.raises(ValueError, match="ACS_ENDPOINT is required"):
+        email_mod.EmailService()
 
 
-def _reload_sms_module():
-    sys.modules.pop("src.acs.sms_service", None)
-    return importlib.import_module("src.acs.sms_service")
+def test_email_service_connection_string_auth_requires_connection_string(monkeypatch):
+    _clear_service_auth_environment(monkeypatch, sender_variable="AZURE_EMAIL_SENDER_ADDRESS")
+    monkeypatch.setenv("ACS_AUTH_MODE", "connection_string")
+    monkeypatch.setattr(email_mod, "AZURE_EMAIL_AVAILABLE", True)
+
+    with pytest.raises(ValueError, match="EMAIL_CONNECTION_STRING.*ACS_CONNECTION_STRING"):
+        email_mod.EmailService()
 
 
-def test_sms_service_prefers_managed_identity(monkeypatch):
-    monkeypatch.setenv("ACS_USE_MANAGED_IDENTITY", "true")
+def test_sms_service_entra_auth_takes_precedence(monkeypatch):
+    _clear_service_auth_environment(monkeypatch, sender_variable="AZURE_SMS_FROM_PHONE_NUMBER")
+    monkeypatch.setenv("ACS_AUTH_MODE", "entra")
     monkeypatch.setenv("ACS_ENDPOINT", "https://x.communication.azure.com/")
     monkeypatch.setenv("AZURE_SMS_FROM_PHONE_NUMBER", "+15555550100")
     monkeypatch.setenv(
         "AZURE_COMMUNICATION_SMS_CONNECTION_STRING",
         "endpoint=https://x.communication.azure.com/;accesskey=key",
     )
-
-    sms_mod = _reload_sms_module()
-
     captured = {}
+    credential = SimpleNamespace(name="stub-credential")
 
     class StubSmsClient:
-        def __init__(self, endpoint, credential):
-            captured["mode"] = "credential"
+        def __init__(self, endpoint, supplied_credential):
             captured["endpoint"] = endpoint
-            captured["credential"] = credential
+            captured["credential"] = supplied_credential
 
         @classmethod
-        def from_connection_string(cls, conn_str):
-            captured["mode"] = "conn_string"
-            return cls("x", "y")
-
-    stub_cred = SimpleNamespace(name="stub-credential")
-    monkeypatch.setattr(sms_mod, "SmsClient", StubSmsClient)
-    monkeypatch.setattr(sms_mod, "get_credential", lambda: stub_cred)
-    monkeypatch.setattr(sms_mod, "AZURE_SMS_AVAILABLE", True)
-
-    service = sms_mod.SmsService()
-
-    assert captured["mode"] == "credential"
-    assert captured["endpoint"] == "https://x.communication.azure.com/"
-    assert captured["credential"] is stub_cred
-    assert service.is_configured() is True
-
-
-def test_sms_service_uses_endpoint_mi_when_no_connection_string(monkeypatch):
-    """The previous SMS implementation had NO MI path — verify the new fallback works."""
-    monkeypatch.delenv("ACS_USE_MANAGED_IDENTITY", raising=False)
-    monkeypatch.delenv("AZURE_COMMUNICATION_SMS_CONNECTION_STRING", raising=False)
-    monkeypatch.delenv("ACS_CONNECTION_STRING", raising=False)
-    monkeypatch.setenv("ACS_ENDPOINT", "https://x.communication.azure.com/")
-    monkeypatch.setenv("AZURE_SMS_FROM_PHONE_NUMBER", "+15555550100")
-    # Simulate Azure-hosted environment so auto-detect picks MI.
-    monkeypatch.setenv("AZURE_CLIENT_ID", "00000000-0000-0000-0000-000000000000")
-
-    sms_mod = _reload_sms_module()
-
-    captured = {}
-
-    class StubSmsClient:
-        def __init__(self, endpoint, credential):
-            captured["mode"] = "credential"
-            captured["endpoint"] = endpoint
-
-    stub_cred = SimpleNamespace(name="stub-credential")
-    monkeypatch.setattr(sms_mod, "SmsClient", StubSmsClient)
-    monkeypatch.setattr(sms_mod, "get_credential", lambda: stub_cred)
-    monkeypatch.setattr(sms_mod, "AZURE_SMS_AVAILABLE", True)
-
-    service = sms_mod.SmsService()
-
-    assert captured["mode"] == "credential"
-    assert service.is_configured() is True
-
-
-def test_sms_service_falls_back_to_connection_string(monkeypatch):
-    monkeypatch.setenv("ACS_USE_MANAGED_IDENTITY", "false")
-    monkeypatch.setenv("AZURE_SMS_FROM_PHONE_NUMBER", "+15555550100")
-    monkeypatch.setenv(
-        "AZURE_COMMUNICATION_SMS_CONNECTION_STRING",
-        "endpoint=https://x.communication.azure.com/;accesskey=key",
-    )
-
-    sms_mod = _reload_sms_module()
-
-    captured = {}
-
-    class StubSmsClient:
-        @classmethod
-        def from_connection_string(cls, conn_str):
-            captured["mode"] = "conn_string"
-            captured["conn_str"] = conn_str
+        def from_connection_string(cls, connection_string):
+            captured["connection_string"] = connection_string
             return cls.__new__(cls)
 
+    monkeypatch.setattr(sms_mod, "AZURE_SMS_AVAILABLE", True)
     monkeypatch.setattr(sms_mod, "SmsClient", StubSmsClient)
+    monkeypatch.setattr(sms_mod, "get_credential", lambda: credential)
+
+    service = sms_mod.SmsService()
+
+    assert service.effective_auth_mode == "entra"
+    assert captured == {
+        "endpoint": "https://x.communication.azure.com/",
+        "credential": credential,
+    }
+    assert service.is_configured() is True
+
+
+def test_sms_service_auto_prefers_connection_string(monkeypatch):
+    _clear_service_auth_environment(monkeypatch, sender_variable="AZURE_SMS_FROM_PHONE_NUMBER")
+    monkeypatch.setenv("ACS_AUTH_MODE", "auto")
+    monkeypatch.setenv("ACS_ENDPOINT", "https://x.communication.azure.com/")
+    monkeypatch.setenv("AZURE_SMS_FROM_PHONE_NUMBER", "+15555550100")
+    monkeypatch.setenv("ACS_CONNECTION_STRING", "endpoint=https://x;accesskey=key")
+    captured = {}
+
+    class StubSmsClient:
+        @classmethod
+        def from_connection_string(cls, connection_string):
+            captured["connection_string"] = connection_string
+            return cls.__new__(cls)
+
+    monkeypatch.setattr(sms_mod, "AZURE_SMS_AVAILABLE", True)
+    monkeypatch.setattr(sms_mod, "SmsClient", StubSmsClient)
+
+    service = sms_mod.SmsService()
+
+    assert service.effective_auth_mode == "connection_string"
+    assert captured["connection_string"].endswith("accesskey=key")
+    assert service.is_configured() is True
+
+
+def test_sms_service_entra_requires_endpoint(monkeypatch):
+    _clear_service_auth_environment(monkeypatch, sender_variable="AZURE_SMS_FROM_PHONE_NUMBER")
+    monkeypatch.setenv("ACS_AUTH_MODE", "entra")
     monkeypatch.setattr(sms_mod, "AZURE_SMS_AVAILABLE", True)
 
-    sms_mod.SmsService()
+    with pytest.raises(ValueError, match="ACS_ENDPOINT is required"):
+        sms_mod.SmsService()
 
-    assert captured["mode"] == "conn_string"
-    assert "accesskey=key" in captured["conn_str"]
+
+def test_sms_service_connection_string_auth_requires_connection_string(monkeypatch):
+    _clear_service_auth_environment(monkeypatch, sender_variable="AZURE_SMS_FROM_PHONE_NUMBER")
+    monkeypatch.setenv("ACS_AUTH_MODE", "connection_string")
+    monkeypatch.setattr(sms_mod, "AZURE_SMS_AVAILABLE", True)
+
+    with pytest.raises(ValueError, match="SMS_CONNECTION_STRING.*ACS_CONNECTION_STRING"):
+        sms_mod.SmsService()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# OPTIONAL-SERVICE IMPORT SAFETY
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def test_invalid_auth_mode_raises_for_explicit_construction(monkeypatch):
+    """Explicit construction still fails loudly on an unusable ACS_AUTH_MODE."""
+    _clear_service_auth_environment(monkeypatch, sender_variable="AZURE_EMAIL_SENDER_ADDRESS")
+    monkeypatch.setenv("ACS_AUTH_MODE", "totally-bogus")
+    monkeypatch.setattr(email_mod, "AZURE_EMAIL_AVAILABLE", True)
+    monkeypatch.setattr(sms_mod, "AZURE_SMS_AVAILABLE", True)
+
+    with pytest.raises(ValueError, match="ACS_AUTH_MODE must be one of"):
+        email_mod.EmailService()
+    with pytest.raises(ValueError, match="ACS_AUTH_MODE must be one of"):
+        sms_mod.SmsService()
+
+
+def test_non_strict_services_degrade_with_single_warning(monkeypatch, caplog):
+    """Non-strict construction degrades to an unconfigured service and warns once."""
+    _clear_service_auth_environment(monkeypatch, sender_variable="AZURE_EMAIL_SENDER_ADDRESS")
+    monkeypatch.delenv("AZURE_SMS_FROM_PHONE_NUMBER", raising=False)
+    monkeypatch.setenv("ACS_AUTH_MODE", "totally-bogus")
+    monkeypatch.setattr(email_mod, "AZURE_EMAIL_AVAILABLE", True)
+    monkeypatch.setattr(sms_mod, "AZURE_SMS_AVAILABLE", True)
+
+    with caplog.at_level("WARNING"):
+        email = email_mod.EmailService(strict=False)
+        sms = sms_mod.SmsService(strict=False)
+
+    assert email.client is None
+    assert email.is_configured() is False
+    assert email.effective_auth_mode is None
+    assert sms._sms_client is None
+    assert sms.is_configured() is False
+    assert sms.effective_auth_mode is None
+
+    warnings_logged = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert sum("Email service disabled" in m for m in warnings_logged) == 1
+    assert sum("SMS service disabled" in m for m in warnings_logged) == 1
+
+
+def test_module_singletons_are_lazy_and_import_safe(monkeypatch):
+    """The legacy module-level singletons resolve lazily and never raise."""
+    monkeypatch.setattr(email_mod, "_default_email_service", None)
+    monkeypatch.setattr(sms_mod, "_default_sms_service", None)
+    _clear_service_auth_environment(monkeypatch, sender_variable="AZURE_EMAIL_SENDER_ADDRESS")
+    monkeypatch.delenv("AZURE_SMS_FROM_PHONE_NUMBER", raising=False)
+    monkeypatch.setenv("ACS_AUTH_MODE", "totally-bogus")
+    monkeypatch.setattr(email_mod, "AZURE_EMAIL_AVAILABLE", True)
+    monkeypatch.setattr(sms_mod, "AZURE_SMS_AVAILABLE", True)
+
+    assert email_mod.email_service is email_mod.get_email_service()
+    assert sms_mod.sms_service is sms_mod.get_sms_service()
+    assert email_mod.is_email_configured() is False
+    assert sms_mod.is_sms_configured() is False
+
+    with pytest.raises(AttributeError):
+        _ = email_mod.does_not_exist
+    with pytest.raises(AttributeError):
+        _ = sms_mod.does_not_exist
+
+
+def test_importing_src_acs_package_with_broken_config_succeeds(monkeypatch):
+    """Importing the package must not fail on invalid optional ACS configuration."""
+    import subprocess
+    import sys
+
+    env = dict(os.environ)
+    env["ACS_AUTH_MODE"] = "totally-bogus"
+    result = subprocess.run(
+        [sys.executable, "-c", "import src.acs; print(src.acs.is_sms_configured())"],
+        cwd=str(REPO_ROOT),
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "False" in result.stdout

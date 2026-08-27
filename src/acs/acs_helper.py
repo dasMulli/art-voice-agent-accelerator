@@ -1,6 +1,5 @@
 import asyncio
 from datetime import datetime, timedelta
-from typing import Literal
 
 from azure.communication.callautomation import (
     AudioFormat,
@@ -24,29 +23,16 @@ from opentelemetry.trace import SpanKind
 from utils.azure_auth import get_credential
 from utils.ml_logging import get_logger
 
+from src.acs.auth import ACSAuthMode, normalize_acs_auth_mode
 from src.enums.stream_modes import StreamMode
 
 logger = get_logger("src.acs")
 tracer = trace.get_tracer(__name__)
 
-ACSAuthMode = Literal["auto", "connection_string", "entra"]
-_CONNECTION_STRING_AUTH_ALIASES = {"connection_string", "connection-string", "key", "access_key"}
-_ENTRA_AUTH_ALIASES = {"entra", "entra_id", "aad", "managed_identity", "default_credential"}
-
 
 def _normalize_acs_auth_mode(auth_mode: str | None) -> ACSAuthMode:
     """Normalize ACS auth mode configuration."""
-    normalized = (auth_mode or "auto").strip().lower()
-    if not normalized or normalized == "auto":
-        return "auto"
-    if normalized in _CONNECTION_STRING_AUTH_ALIASES:
-        return "connection_string"
-    if normalized in _ENTRA_AUTH_ALIASES:
-        return "entra"
-    raise ValueError(
-        "ACS_AUTH_MODE must be one of: auto, connection_string, entra "
-        f"(got {auth_mode!r})"
-    )
+    return normalize_acs_auth_mode(auth_mode)
 
 
 def _endpoint_host_from_client(client: CallAutomationClient) -> str:
@@ -250,7 +236,9 @@ class AcsCaller:
         try:
             logger.info(f"Initiating call from {self.source_number} to {target_number}")
             logger.info(f"🔗 ACS Callback URL: {self.callback_url}")
-            logger.info(f"🔗 ACS WebSocket URL: {self.media_streaming_options.transport_url if self.media_streaming_options else 'N/A'}")
+            logger.info(
+                f"🔗 ACS WebSocket URL: {self.media_streaming_options.transport_url if self.media_streaming_options else 'N/A'}"
+            )
             logger.debug(f"Stream mode: {stream_mode}")
             logger.debug(f"Transcription options: {self.transcription_opts}")
             logger.debug(f"Media streaming options: {self.media_streaming_options}")
@@ -319,7 +307,9 @@ class AcsCaller:
         try:
             logger.info(f"Answering incoming call: {incoming_call_context}")
             logger.info(f"🔗 ACS Callback URL: {self.callback_url}")
-            logger.info(f"🔗 ACS WebSocket URL: {self.media_streaming_options.transport_url if self.media_streaming_options else 'N/A'}")
+            logger.info(
+                f"🔗 ACS WebSocket URL: {self.media_streaming_options.transport_url if self.media_streaming_options else 'N/A'}"
+            )
             transcription = None
             cognitive_services_endpoint = None
             media_streaming = None

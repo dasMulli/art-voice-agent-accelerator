@@ -85,16 +85,6 @@ def _create_credential_internal():
     )
 
 
-def should_use_managed_identity_for_acs() -> bool:
-    """Return whether ACS clients should prefer managed identity auth."""
-    override = os.getenv("ACS_USE_MANAGED_IDENTITY", "").strip().lower()
-    if override in {"1", "true", "yes", "on"}:
-        return True
-    if override in {"0", "false", "no", "off"}:
-        return False
-    return _using_managed_identity()
-
-
 @lru_cache(maxsize=1)
 def get_credential():
     """

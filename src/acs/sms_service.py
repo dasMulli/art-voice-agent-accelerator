@@ -13,7 +13,10 @@ import os
 import threading
 from typing import Any
 
+from utils.azure_auth import get_credential
 from utils.ml_logging import get_logger
+
+from src.acs.auth import ACSAuthMode, normalize_acs_auth_mode
 
 # SMS service imports
 try:
@@ -29,21 +32,66 @@ logger = get_logger("sms_service")
 class SmsService:
     """Reusable SMS service for ARTAgent tools."""
 
-    def __init__(self):
-        """Initialize the SMS service with Azure configuration."""
-        self.connection_string = os.getenv("AZURE_COMMUNICATION_SMS_CONNECTION_STRING")
+    def __init__(self, *, strict: bool = True):
+        """
+        Initialize the SMS service with Azure configuration.
+
+        Args:
+            strict: When True (default) invalid ACS configuration raises ``ValueError``.
+                When False the service degrades to an unconfigured instance and logs
+                a single warning, which keeps optional-service imports safe.
+        """
+        self.connection_string = os.getenv(
+            "AZURE_COMMUNICATION_SMS_CONNECTION_STRING"
+        ) or os.getenv("ACS_CONNECTION_STRING")
         self.from_phone_number = os.getenv("AZURE_SMS_FROM_PHONE_NUMBER")
+        self.endpoint = os.getenv("ACS_ENDPOINT")
+        self.auth_mode: ACSAuthMode = "auto"
+        self.effective_auth_mode: ACSAuthMode | None = None
+        self.credential = None
         # Pre-create the SMS client once (avoid per-call overhead)
         self._sms_client: SmsClient | None = None
-        if AZURE_SMS_AVAILABLE and self.connection_string:
-            try:
+
+        if not AZURE_SMS_AVAILABLE:
+            return
+
+        try:
+            self.auth_mode = normalize_acs_auth_mode(os.getenv("ACS_AUTH_MODE"))
+
+            if self.auth_mode == "auto":
+                self.effective_auth_mode = (
+                    "connection_string" if self.connection_string else "entra"
+                )
+            else:
+                self.effective_auth_mode = self.auth_mode
+
+            if self.effective_auth_mode == "connection_string":
+                if not self.connection_string:
+                    raise ValueError(
+                        "AZURE_COMMUNICATION_SMS_CONNECTION_STRING or ACS_CONNECTION_STRING "
+                        "is required when ACS_AUTH_MODE=connection_string"
+                    )
                 self._sms_client = SmsClient.from_connection_string(self.connection_string)
-            except Exception as exc:
-                logger.warning("Failed to pre-create SmsClient: %s", exc)
+                return
+
+            if not self.endpoint:
+                if self.auth_mode == "entra":
+                    raise ValueError("ACS_ENDPOINT is required when ACS_AUTH_MODE=entra")
+                return
+
+            self.credential = get_credential()
+            self._sms_client = SmsClient(self.endpoint, self.credential)
+        except ValueError as exc:
+            if strict:
+                raise
+            self.effective_auth_mode = None
+            self.credential = None
+            self._sms_client = None
+            logger.warning("SMS service disabled - invalid ACS configuration: %s", exc)
 
     def is_configured(self) -> bool:
         """Check if SMS service is properly configured."""
-        return AZURE_SMS_AVAILABLE and bool(self.connection_string) and bool(self.from_phone_number)
+        return AZURE_SMS_AVAILABLE and self._sms_client is not None and bool(self.from_phone_number)
 
     async def send_sms(
         self,
@@ -76,10 +124,8 @@ class SmsService:
             if isinstance(to_phone_numbers, str):
                 to_phone_numbers = [to_phone_numbers]
 
-            # Use pre-created SMS client (falls back to creating one if needed)
+            # The configured client is created once during initialization.
             client = self._sms_client
-            if client is None:
-                client = SmsClient.from_connection_string(self.connection_string)
 
             # Offload blocking SDK call to thread pool
             def _blocking_send():
@@ -202,8 +248,28 @@ class SmsService:
             logger.error("Failed to start background SMS thread: %s", exc)
 
 
-# Global SMS service instance
-sms_service = SmsService()
+# Lazily-created process-wide SMS service.
+# Import must never fail on optional/invalid ACS configuration, so the shared
+# instance is built non-strict on first use.
+_default_sms_service: SmsService | None = None
+_default_sms_service_lock = threading.Lock()
+
+
+def get_sms_service() -> SmsService:
+    """Return the shared SMS service, creating it on first use."""
+    global _default_sms_service
+    if _default_sms_service is None:
+        with _default_sms_service_lock:
+            if _default_sms_service is None:
+                _default_sms_service = SmsService(strict=False)
+    return _default_sms_service
+
+
+def __getattr__(name: str) -> Any:
+    """Resolve the legacy module-level ``sms_service`` singleton lazily."""
+    if name == "sms_service":
+        return get_sms_service()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 # Convenience functions for easy import
@@ -214,7 +280,7 @@ async def send_sms(
     tag: str | None = None,
 ) -> dict[str, Any]:
     """Convenience function to send SMS."""
-    return await sms_service.send_sms(to_phone_numbers, message, enable_delivery_report, tag)
+    return await get_sms_service().send_sms(to_phone_numbers, message, enable_delivery_report, tag)
 
 
 def send_sms_background(
@@ -225,11 +291,11 @@ def send_sms_background(
     callback: callable | None = None,
 ) -> None:
     """Convenience function to send SMS in background."""
-    sms_service.send_sms_background(
+    get_sms_service().send_sms_background(
         to_phone_numbers, message, enable_delivery_report, tag, callback
     )
 
 
 def is_sms_configured() -> bool:
     """Check if SMS service is configured."""
-    return sms_service.is_configured()
+    return get_sms_service().is_configured()

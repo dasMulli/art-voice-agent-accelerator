@@ -6,9 +6,13 @@ to prevent memory leaks across multiple sessions.
 """
 
 import asyncio
+import functools
 import gc
+import logging
 import tracemalloc
+import warnings
 from collections import deque
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -73,6 +77,7 @@ class FakeVoiceLiveAgent:
         self.modalities = []
         self.turn_detection = None
         self.tool_choice = "auto"
+        self.applied_sessions: list[dict] = []
 
     def render_greeting(self, context=None):
         return self._greeting
@@ -82,6 +87,10 @@ class FakeVoiceLiveAgent:
 
     async def apply_session(self, conn, **kwargs):
         await asyncio.sleep(0)
+
+    async def apply_voicelive_session(self, conn, **kwargs):
+        await asyncio.sleep(0)
+        self.applied_sessions.append(kwargs)
 
     async def trigger_response(self, conn, **kwargs):
         await asyncio.sleep(0)
@@ -657,6 +666,7 @@ __all__ = [
     "TestUserMessageHistoryBounds",
     "TestHotPathOptimization",
     "TestScenarioUpdate",
+    "TestScenarioSessionUpdateScheduling",
 ]
 
 
@@ -931,6 +941,154 @@ class TestScenarioUpdate:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# SCENARIO SESSION UPDATE SCHEDULING TESTS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestScenarioSessionUpdateScheduling:
+    """Tests for _schedule_scenario_session_update loop handling."""
+
+    @staticmethod
+    def _create_orchestrator():
+        from apps.artagent.backend.voice.voicelive.orchestrator import LiveOrchestrator
+
+        return LiveOrchestrator(
+            conn=FakeVoiceLiveConnection(),
+            agents={"Concierge": FakeVoiceLiveAgent("Concierge")},
+            handoff_map={},
+            start_agent="Concierge",
+        )
+
+    def test_no_running_loop_skips_update_without_dropping_coroutine(self, caplog):
+        """Synchronous callers without a live loop log once and create no coroutine."""
+        orchestrator = self._create_orchestrator()
+        banking = FakeVoiceLiveAgent("Banking")
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", RuntimeWarning)
+            with caplog.at_level(logging.WARNING):
+                orchestrator.update_scenario(
+                    agents={"Banking": banking},
+                    handoff_map={},
+                    start_agent="Banking",
+                )
+            # Un-awaited coroutines only warn when collected - force it inside the
+            # error filter so a dropped coroutine would fail this test.
+            gc.collect()
+
+        messages = [record.getMessage() for record in caplog.records]
+        assert (
+            sum("no running event loop owns this orchestrator" in m for m in messages) == 1
+        ), messages
+        assert banking.applied_sessions == []
+        assert orchestrator._background_tasks == set()
+
+        orchestrator.cleanup()
+
+    @pytest.mark.asyncio
+    async def test_update_on_owning_loop_creates_task(self):
+        """Called on the owning loop, the update runs as a tracked task."""
+        orchestrator = self._create_orchestrator()
+        # Real async lifecycle point: event routing binds the owning loop.
+        await orchestrator.handle_event(SimpleNamespace(type="test.unknown-event"))
+        assert orchestrator._owner_loop is asyncio.get_running_loop()
+
+        banking = FakeVoiceLiveAgent("Banking")
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", RuntimeWarning)
+            orchestrator.update_scenario(
+                agents={"Banking": banking},
+                handoff_map={},
+                start_agent="Banking",
+            )
+            assert len(orchestrator._background_tasks) == 1
+
+            await asyncio.sleep(0.05)
+            gc.collect()
+
+        assert len(banking.applied_sessions) == 1
+        assert banking.applied_sessions[0]["say"] is None
+        assert orchestrator._background_tasks == set()
+
+        orchestrator.cleanup()
+
+    @pytest.mark.asyncio
+    async def test_update_from_other_thread_uses_captured_owner_loop(self):
+        """Calls from another thread are scheduled on the captured owning loop."""
+        orchestrator = self._create_orchestrator()
+        await orchestrator.handle_event(SimpleNamespace(type="test.unknown-event"))
+        owner_loop = orchestrator._owner_loop
+        assert owner_loop is asyncio.get_running_loop()
+
+        banking = FakeVoiceLiveAgent("Banking")
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", RuntimeWarning)
+            await asyncio.to_thread(
+                functools.partial(
+                    orchestrator.update_scenario,
+                    agents={"Banking": banking},
+                    handoff_map={},
+                    start_agent="Banking",
+                )
+            )
+
+            await asyncio.sleep(0.05)
+            gc.collect()
+
+        assert orchestrator._owner_loop is owner_loop
+        assert len(banking.applied_sessions) == 1
+
+        orchestrator.cleanup()
+
+    @pytest.mark.asyncio
+    async def test_background_task_failure_is_logged(self, caplog):
+        """Failures of the scheduled update are observed, never silently dropped."""
+        orchestrator = self._create_orchestrator()
+
+        async def _boom():
+            raise RuntimeError("scheduled update exploded")
+
+        task = asyncio.get_running_loop().create_task(_boom())
+        task.add_done_callback(orchestrator._log_scenario_session_update_result)
+
+        with caplog.at_level(logging.WARNING):
+            await asyncio.sleep(0.01)
+
+        assert any(
+            "Scenario session update task failed" in record.getMessage()
+            for record in caplog.records
+        )
+
+        orchestrator.cleanup()
+
+    @pytest.mark.asyncio
+    async def test_cancelled_background_task_is_not_reported_as_failure(self, caplog):
+        """Cancellation is a normal shutdown path and must not log a failure."""
+        orchestrator = self._create_orchestrator()
+
+        async def _never():
+            await asyncio.sleep(10)
+
+        task = asyncio.get_running_loop().create_task(_never())
+        task.add_done_callback(orchestrator._log_scenario_session_update_result)
+
+        with caplog.at_level(logging.WARNING):
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            await asyncio.sleep(0.01)
+
+        assert not any(
+            "Scenario session update task failed" in record.getMessage()
+            for record in caplog.records
+        )
+
+        orchestrator.cleanup()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # HOT PATH OPTIMIZATION TESTS
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -1030,7 +1188,8 @@ class TestHotPathOptimization:
 
         orchestrator.cleanup()
 
-    def test_schedule_background_sync_is_non_blocking(self):
+    @pytest.mark.asyncio
+    async def test_schedule_background_sync_is_non_blocking(self):
         """Verify _schedule_background_sync doesn't block."""
         from apps.artagent.backend.voice.voicelive.orchestrator import LiveOrchestrator
 
@@ -1046,8 +1205,13 @@ class TestHotPathOptimization:
             memo_manager=memo_manager,
         )
 
-        # Should not raise and should return immediately
+        orchestrator._sync_to_memo_manager = MagicMock()
+
+        # Scheduling returns immediately; the synchronization runs on the next loop turn.
         orchestrator._schedule_background_sync()
+        orchestrator._sync_to_memo_manager.assert_not_called()
+        await asyncio.sleep(0)
+        orchestrator._sync_to_memo_manager.assert_called_once_with()
 
         orchestrator.cleanup()
 

@@ -42,7 +42,7 @@ AZURE_EMAIL_SENDER_ADDRESS=DoNotReply@<your-domain>.azurecomm.net
 # Optional local-dev override (connection string):
 AZURE_COMMUNICATION_EMAIL_CONNECTION_STRING=endpoint=https://<your-acs>.communication.azure.com/;accesskey=<key>
 # Force connection-string mode even in Azure if needed:
-# ACS_USE_MANAGED_IDENTITY=false
+# ACS_AUTH_MODE=connection_string
 ```
 
 ### Step 4: Restart Backend
@@ -80,7 +80,7 @@ curl -X POST "http://localhost:8010/api/v1/tools/test-email" \
 | `ACS_ENDPOINT` | Yes (prod) | ACS resource endpoint, used with managed identity |
 | `AZURE_EMAIL_SENDER_ADDRESS` | Yes | Sender email (e.g., `DoNotReply@xxx.azurecomm.net`) |
 | `AZURE_COMMUNICATION_EMAIL_CONNECTION_STRING` | Local dev | ACS connection string (used only if MI is unavailable) |
-| `ACS_USE_MANAGED_IDENTITY` | No | `true`/`false` override. Default: auto-detect Azure-hosted environment |
+| `ACS_AUTH_MODE` | No | `auto` (default), `entra`, or `connection_string` |
 
 ---
 

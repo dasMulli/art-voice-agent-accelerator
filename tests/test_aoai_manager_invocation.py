@@ -1,8 +1,7 @@
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-
 from apps.artagent.backend.registries.agentstore.base import ModelConfig
 from src.aoai.manager import AzureOpenAIManager
 
@@ -16,7 +15,7 @@ async def test_generate_response_respects_responses_config():
         enable_tracing=False,
     )
     fake_client = MagicMock()
-    fake_client.responses.create = MagicMock(
+    fake_client.responses.create = AsyncMock(
         return_value=SimpleNamespace(
             id="resp_1",
             model="o4-mini",
@@ -77,7 +76,7 @@ async def test_generate_response_respects_chat_config():
     fake_client.responses.create = MagicMock()
     fake_client.chat = MagicMock()
     fake_client.chat.completions = MagicMock()
-    fake_client.chat.completions.create = MagicMock(
+    fake_client.chat.completions.create = AsyncMock(
         return_value=SimpleNamespace(
             id="chat_1",
             model="gpt-4o",

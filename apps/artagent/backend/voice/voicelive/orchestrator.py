@@ -285,6 +285,14 @@ class LiveOrchestrator:
         # self.active with stale MemoManager data after an explicit scenario switch
         self._scenario_switch_pending: bool = False
 
+        # Event loop that owns this orchestrator's async lifecycle. Captured when
+        # an async lifecycle entry point runs so background work scheduled from
+        # synchronous callers (including other threads) targets the right loop.
+        self._owner_loop: asyncio.AbstractEventLoop | None = None
+        # Strong references to fire-and-forget background tasks (asyncio only keeps
+        # weak references, so an unreferenced task can be garbage collected).
+        self._background_tasks: set[asyncio.Task] = set()
+
         # Track pending tool outputs to batch them before calling response.create()
         # When model makes multiple tool calls, we queue results and trigger ONE response
         self._pending_tool_outputs: list[tuple[str, str]] = []  # [(call_id, output_json), ...]
@@ -337,6 +345,55 @@ class LiveOrchestrator:
     def memo_manager(self) -> MemoManager | None:
         """Return the current MemoManager instance."""
         return self._memo_manager
+
+    @staticmethod
+    def _running_loop() -> asyncio.AbstractEventLoop | None:
+        """Return the loop running on this thread, if any."""
+        try:
+            return asyncio.get_running_loop()
+        except RuntimeError:
+            return None
+
+    def _capture_owner_loop(self) -> asyncio.AbstractEventLoop | None:
+        """
+        Record the running event loop as this orchestrator's owning loop.
+
+        Called from async lifecycle entry points (``start``/``handle_event``) so
+        synchronous callers can schedule background work on a live loop.
+        """
+        loop = self._running_loop()
+        if loop is not None and self._owner_loop is not loop:
+            self._owner_loop = loop
+        return loop
+
+    def _owning_loop_if_running(self) -> asyncio.AbstractEventLoop | None:
+        """Return the captured owner loop only while it is still running."""
+        loop = self._owner_loop
+        if loop is not None and not loop.is_closed() and loop.is_running():
+            return loop
+        return None
+
+    def _resolve_background_loop(self) -> tuple[asyncio.AbstractEventLoop | None, bool]:
+        """
+        Resolve where fire-and-forget background work should run.
+
+        Returns ``(loop, on_this_thread)``. ``loop`` is None when no live loop
+        owns this orchestrator - callers must then skip the work without
+        constructing a coroutine that could never be awaited.
+        """
+        owner_loop = self._owning_loop_if_running()
+        current_loop = self._running_loop()
+
+        # Running on the owning loop (or adopting it when none was captured yet).
+        if current_loop is not None and (owner_loop is None or current_loop is owner_loop):
+            self._owner_loop = current_loop
+            return current_loop, True
+
+        # Called from another thread while the owning loop is still alive.
+        if owner_loop is not None:
+            return owner_loop, False
+
+        return None, False
 
     @property
     def _session_id(self) -> str | None:
@@ -492,6 +549,7 @@ class LiveOrchestrator:
 
         This should be called when the VoiceLive session ends. It:
         - Cancels all pending greeting tasks
+        - Cancels pending background session-update tasks
         - Clears references to agents and connections
         - Clears user message history deque
         - Resets all stateful tracking variables
@@ -501,6 +559,12 @@ class LiveOrchestrator:
         """
         # Cancel all pending greeting tasks
         self._cancel_pending_greeting_tasks()
+
+        # Cancel pending fire-and-forget background tasks
+        for task in list(self._background_tasks):
+            if not task.done():
+                task.cancel()
+        self._background_tasks.clear()
 
         # Clear agents registry reference
         self.agents = {}
@@ -530,6 +594,7 @@ class LiveOrchestrator:
 
         # Reset tracking variables
         self._active_response_id = None
+        self._owner_loop = None
         self._system_vars.clear()
         self.visited_agents.clear()
 
@@ -629,7 +694,10 @@ class LiveOrchestrator:
         switches to take effect properly in VoiceLive.
 
         This runs in the background to avoid blocking the scenario update call.
+        When no live event loop owns this orchestrator the update is skipped with
+        a warning instead of creating a coroutine that can never run.
         """
+
         async def _do_update():
             try:
                 agent = self.agents.get(self.active)
@@ -673,16 +741,35 @@ class LiveOrchestrator:
             except Exception:
                 logger.warning("Failed to update session after scenario change", exc_info=True)
 
-        # Schedule on the event loop
+        # Schedule on a live event loop. The coroutine is only created once a
+        # concrete scheduling target exists, so it can never be left un-awaited.
+        loop, on_this_thread = self._resolve_background_loop()
+        if loop is None:
+            logger.warning(
+                "Cannot schedule session update - no running event loop owns this orchestrator | agent=%s",
+                self.active,
+            )
+            return
+
+        if on_this_thread:
+            task = loop.create_task(_do_update())
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
+            task.add_done_callback(self._log_scenario_session_update_result)
+            return
+
+        future = asyncio.run_coroutine_threadsafe(_do_update(), loop)
+        future.add_done_callback(self._log_scenario_session_update_result)
+
+    @staticmethod
+    def _log_scenario_session_update_result(completed) -> None:
+        """Surface failures from the background scenario session update."""
         try:
-            loop = asyncio.get_running_loop()
-            asyncio.run_coroutine_threadsafe(_do_update(), loop)
-        except RuntimeError:
-            # No running loop - try create_task if we're in an async context
-            try:
-                asyncio.create_task(_do_update())
-            except RuntimeError:
-                logger.warning("Cannot schedule session update - no event loop available")
+            error = completed.exception()
+        except asyncio.CancelledError:
+            return
+        if error is not None:
+            logger.warning("Scenario session update task failed: %s", error, exc_info=error)
 
     async def _inject_conversation_history(self) -> None:
         """
@@ -1021,7 +1108,15 @@ class LiveOrchestrator:
                 logger.debug("Background MemoManager sync failed", exc_info=True)
 
         # Schedule on next event loop iteration to not block current coroutine
-        asyncio.get_event_loop().call_soon(_do_sync)
+        loop, on_this_thread = self._resolve_background_loop()
+        if loop is None:
+            logger.debug("Skipping background MemoManager sync - no running event loop")
+            return
+
+        if on_this_thread:
+            loop.call_soon(_do_sync)
+        else:
+            loop.call_soon_threadsafe(_do_sync)
 
     # ═══════════════════════════════════════════════════════════════════════════
     # HANDOFF RESOLUTION
@@ -1068,6 +1163,7 @@ class LiveOrchestrator:
 
     async def start(self, system_vars: dict | None = None):
         """Apply initial agent session and trigger an intro response."""
+        self._capture_owner_loop()
         with tracer.start_as_current_span(
             "voicelive_orchestrator.start",
             kind=trace.SpanKind.INTERNAL,
@@ -1154,6 +1250,7 @@ class LiveOrchestrator:
 
     async def handle_event(self, event):
         """Route VoiceLive events to audio + handoff logic."""
+        self._capture_owner_loop()
         et = event.type
 
         if et == ServerEventType.SESSION_UPDATED:

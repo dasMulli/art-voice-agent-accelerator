@@ -35,20 +35,34 @@ Example usage:
         to_phone="+1234567890",
         message=message
     )
+
+Shared, process-wide instances are available through ``get_email_service()`` and
+``get_sms_service()``. They are created lazily and never raise on invalid
+configuration - an unusable configuration degrades to an unconfigured service so
+importing this package is always safe. Construct ``EmailService()``/``SmsService()``
+directly when configuration errors should be raised.
 """
 
-from .email_service import EmailService
+from .email_service import EmailService, get_email_service, is_email_configured
 from .email_templates import EmailTemplates
-from .sms_service import SmsService, is_sms_configured, send_sms, send_sms_background, sms_service
+from .sms_service import (
+    SmsService,
+    get_sms_service,
+    is_sms_configured,
+    send_sms,
+    send_sms_background,
+)
 from .sms_templates import SmsTemplates
 
 __all__ = [
     "EmailService",
     "EmailTemplates",
+    "get_email_service",
+    "get_sms_service",
+    "is_email_configured",
     "send_sms",
     "send_sms_background",
     "is_sms_configured",
     "SmsService",
-    "sms_service",
     "SmsTemplates",
 ]
