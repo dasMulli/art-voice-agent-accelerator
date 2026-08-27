@@ -71,7 +71,9 @@ public sealed class AzureGroundedReplyGenerator : IGroundedReplyGenerator
             timeout.Token);
         var messages = new List<ChatMessage>
         {
-            new SystemChatMessage(GroundedPromptBuilder.BuildDeveloperPrompt(script)),
+            new SystemChatMessage(GroundedPromptBuilder.BuildDeveloperPrompt(
+                script,
+                CallerResponseLanguageResolver.Resolve(script, transcript))),
             new UserChatMessage(GroundedPromptBuilder.BuildConversationMessage(transcript)),
         };
         var options = new ChatCompletionOptions
@@ -119,13 +121,18 @@ internal static class GroundedPromptBuilder
         }
         """;
 
-    public static string BuildDeveloperPrompt(CallerScriptSnapshot script)
+    public static string BuildDeveloperPrompt(
+        CallerScriptSnapshot script,
+        CallerResponseLanguage responseLanguage)
     {
         ArgumentNullException.ThrowIfNull(script);
+        ArgumentNullException.ThrowIfNull(responseLanguage);
 
         return $$"""
             You are the CALLER in a service-desk phone conversation. Speak only as the caller.
-            Use {{GetLanguageName(script.Locale)}} (locale {{script.Locale}}) for every spoken response.
+            The response language for this turn is fixed by the caller application, not by you:
+            {{responseLanguage.LanguageName}} (locale {{responseLanguage.Locale}}).
+            Respond only in {{responseLanguage.LanguageName}}.{{BuildTransitionRule(script, responseLanguage)}}
             Answer exactly and only the latest service-desk question. Keep spoken_text concise, natural
             for text-to-speech, and suitable for a phone call.
 
@@ -149,6 +156,36 @@ internal static class GroundedPromptBuilder
 
             Return only an object conforming to the supplied strict JSON schema. "reason" is a short,
             non-spoken operational reason. Do not return markdown or facts outside the immutable script.
+            """;
+    }
+
+    /// <summary>
+    /// Describes the already-applied deterministic language transition so the model understands why
+    /// the fixed response language may differ from the script's opening locale. The model never
+    /// decides the switch.
+    /// </summary>
+    private static string BuildTransitionRule(
+        CallerScriptSnapshot script,
+        CallerResponseLanguage responseLanguage)
+    {
+        if (script.LanguageSwitch is not { } policy)
+        {
+            return string.Empty;
+        }
+
+        var initialLanguage = CallerResponseLanguageResolver.GetLanguageName(script.Locale);
+        var targetLanguage = CallerResponseLanguageResolver.GetLanguageName(policy.TargetLocale);
+        var turnWord = policy.AfterFinalServiceDeskTurns == 1 ? "turn" : "turns";
+        var state = responseLanguage.HasSwitched
+            ? $"That threshold is already reached, so this turn and every later turn must be in {targetLanguage} only."
+            : $"That threshold is not reached yet, so this turn must still be in {initialLanguage} only.";
+
+        return $"""
+
+            Deterministic language transition rule applied by the caller application: the caller opens
+            in {initialLanguage} (locale {script.Locale}) and switches to {targetLanguage} (locale {policy.TargetLocale})
+            after {policy.AfterFinalServiceDeskTurns} finalized service-desk {turnWord}.
+            {state} Never decide the switch yourself and never mix languages in one reply.
             """;
     }
 
@@ -179,9 +216,6 @@ internal static class GroundedPromptBuilder
 
         return builder.ToString();
     }
-
-    private static string GetLanguageName(string locale) =>
-        locale.StartsWith("de", StringComparison.OrdinalIgnoreCase) ? "German" : "English";
 }
 
 /// <summary>

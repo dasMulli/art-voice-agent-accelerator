@@ -26,7 +26,9 @@ public sealed class ScriptedCallerOrchestratorTests
                 TranscriptStatus.Final),
         };
 
-        var prompt = GroundedPromptBuilder.BuildDeveloperPrompt(script);
+        var prompt = GroundedPromptBuilder.BuildDeveloperPrompt(
+            script,
+            CallerResponseLanguageResolver.Resolve(script, history));
         var conversation = GroundedPromptBuilder.BuildConversationMessage(history);
 
         Assert.Equal("Maya", script.Identity);
@@ -618,15 +620,110 @@ public sealed class ScriptedCallerOrchestratorTests
         Assert.Contains("Which device has the problem?", conversation, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void Prompt_PinsTheCurrentResponseLanguageAndTheDeterministicTransitionRule()
+    {
+        var script = CallerScriptSnapshot.FromDraft(CreateSwitchingDraft());
+        var beforeSwitch = CallerResponseLanguageResolver.Resolve(script, finalServiceDeskTurnCount: 0);
+        var afterSwitch = CallerResponseLanguageResolver.Resolve(script, finalServiceDeskTurnCount: 1);
+
+        var germanPrompt = GroundedPromptBuilder.BuildDeveloperPrompt(script, beforeSwitch);
+        var polishPrompt = GroundedPromptBuilder.BuildDeveloperPrompt(script, afterSwitch);
+
+        Assert.Contains("German (locale de-DE)", germanPrompt, StringComparison.Ordinal);
+        Assert.DoesNotContain("Respond only in Polish", germanPrompt, StringComparison.Ordinal);
+        Assert.Contains("Respond only in German", germanPrompt, StringComparison.Ordinal);
+        Assert.Contains("after 1 finalized service-desk turn", germanPrompt, StringComparison.Ordinal);
+
+        Assert.Contains("Polish (locale pl-PL)", polishPrompt, StringComparison.Ordinal);
+        Assert.Contains("Respond only in Polish", polishPrompt, StringComparison.Ordinal);
+        Assert.DoesNotContain("Respond only in German", polishPrompt, StringComparison.Ordinal);
+        Assert.Contains("Never invent", polishPrompt, StringComparison.Ordinal);
+        Assert.Contains("hang_up", polishPrompt, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task LanguageSwitchScript_SpeaksTheGermanOpeningThenPolishFollowUps()
+    {
+        var call = new FakeCallSession();
+        var model = new FakeReplyGenerator
+        {
+            Decision = new GroundedModelDecision(GroundedReplyAction.Reply, "Awaria sieci trwa.", "Grounded."),
+        };
+        var speech = new FakeSpeechPipeline();
+        await using var orchestrator = CreateOrchestrator(
+            call,
+            model,
+            speech,
+            new FakeAudioMonitor(),
+            script: CallerScriptSnapshot.FromDraft(CreateSwitchingDraft()));
+        await orchestrator.StartAsync();
+
+        Assert.Equal(["de-DE-KatjaNeural"], speech.SynthesizedVoices);
+
+        speech.EmitFinal("Welches Netz ist betroffen?", "segment-1");
+        await EventuallyAsync(() => speech.SynthesizedVoices.Count == 2);
+
+        speech.EmitFinal("Seit wann besteht die Störung?", "segment-2");
+        await EventuallyAsync(() => speech.SynthesizedVoices.Count == 3);
+
+        Assert.Equal(
+            ["de-DE-KatjaNeural", "pl-PL-ZofiaNeural", "pl-PL-ZofiaNeural"],
+            speech.SynthesizedVoices);
+    }
+
+    [Fact]
+    public async Task LanguageSwitch_KeepsTheServiceDeskRecognitionLocaleAndNeverRestartsRecognition()
+    {
+        var call = new FakeCallSession();
+        var model = new FakeReplyGenerator
+        {
+            Decision = new GroundedModelDecision(GroundedReplyAction.Reply, "Awaria sieci trwa.", "Grounded."),
+        };
+        var speech = new FakeSpeechPipeline();
+        await using var orchestrator = CreateOrchestrator(
+            call,
+            model,
+            speech,
+            new FakeAudioMonitor(),
+            script: CallerScriptSnapshot.FromDraft(CreateSwitchingDraft()));
+        await orchestrator.StartAsync();
+
+        speech.EmitFinal("Welches Netz ist betroffen?", "segment-1");
+        await EventuallyAsync(() => speech.SynthesizedVoices.Count == 2);
+
+        Assert.Equal(["de-DE"], speech.RecognitionLocales);
+        Assert.Equal(0, speech.StopCalls);
+    }
+
+    [Fact]
+    public async Task OrdinaryScript_KeepsOneVoiceForEveryTurn()
+    {
+        var call = new FakeCallSession();
+        var model = new FakeReplyGenerator
+        {
+            Decision = new GroundedModelDecision(GroundedReplyAction.Reply, "Es ist der Drucker.", "Grounded."),
+        };
+        var speech = new FakeSpeechPipeline();
+        await using var orchestrator = CreateOrchestrator(call, model, speech, new FakeAudioMonitor());
+        await orchestrator.StartAsync();
+
+        speech.EmitFinal("Welches Gerät ist betroffen?", "segment-1");
+        await EventuallyAsync(() => speech.SynthesizedVoices.Count == 2);
+
+        Assert.Equal(["de-DE-KatjaNeural", "de-DE-KatjaNeural"], speech.SynthesizedVoices);
+    }
+
     private static ScriptedCallerOrchestrator CreateOrchestrator(
         FakeCallSession call,
         FakeReplyGenerator model,
         FakeSpeechPipeline speech,
         FakeAudioMonitor monitor,
         TimeProvider? timeProvider = null,
-        TimeSpan? recognitionStopTimeout = null) =>
+        TimeSpan? recognitionStopTimeout = null,
+        CallerScriptSnapshot? script = null) =>
         new(
-            CallerScriptSnapshot.FromDraft(CreateDraft()),
+            script ?? CallerScriptSnapshot.FromDraft(CreateDraft()),
             call,
             model,
             speech,
@@ -655,6 +752,26 @@ public sealed class ScriptedCallerOrchestratorTests
         Urgency = "High",
         CallbackNumber = "+4915112345678",
         AdditionalDetails = "Call back after the printer queue is cleared.",
+    };
+
+    private static CallerScriptDraft CreateSwitchingDraft() => new()
+    {
+        Name = "[DE→PL] Netzwerkstörung / awaria sieci",
+        Locale = "de-DE",
+        Voice = "de-DE-KatjaNeural",
+        OpeningLine = "Guten Tag, hier ist Maya vom Standort Wien.",
+        Identity = "Maya",
+        Background = "Das Standortnetz ist seit heute Morgen ausgefallen.",
+        Reason = "Wir brauchen eine Störungsmeldung und eine Eskalation.",
+        Urgency = "Hoch",
+        CallbackNumber = "+4915112345682",
+        AdditionalDetails = "Rückruf jederzeit möglich.",
+        LanguageSwitch = new CallerLanguageSwitchPolicy
+        {
+            TargetLocale = "pl-PL",
+            TargetVoice = "pl-PL-ZofiaNeural",
+            AfterFinalServiceDeskTurns = 1,
+        },
     };
 
     private static byte[] CreateTone(byte value)
@@ -863,6 +980,10 @@ public sealed class ScriptedCallerOrchestratorTests
 
         public List<string> SynthesizedTexts { get; } = [];
 
+        public List<string> SynthesizedVoices { get; } = [];
+
+        public List<string> RecognitionLocales { get; } = [];
+
         public List<byte[]> WrittenFrames { get; } = [];
 
         public int StopCalls { get; private set; }
@@ -875,7 +996,11 @@ public sealed class ScriptedCallerOrchestratorTests
 
         public int DisposeCalls { get; private set; }
 
-        public Task StartRecognitionAsync(string locale, CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task StartRecognitionAsync(string locale, CancellationToken cancellationToken)
+        {
+            RecognitionLocales.Add(locale);
+            return Task.CompletedTask;
+        }
 
         public ValueTask WritePcmAsync(ReadOnlyMemory<byte> pcm16KMono, CancellationToken cancellationToken)
         {
@@ -890,6 +1015,7 @@ public sealed class ScriptedCallerOrchestratorTests
             try
             {
                 SynthesizedTexts.Add(text);
+                SynthesizedVoices.Add(voice);
                 return Task.FromResult(Synthesis(text));
             }
             finally

@@ -13,7 +13,8 @@ public sealed record CallerScriptSnapshot(
     string Reason,
     string Urgency,
     string CallbackNumber,
-    string AdditionalDetails)
+    string AdditionalDetails,
+    CallerLanguageSwitchPolicy? LanguageSwitch = null)
 {
     /// <summary>
     /// Copies an editable draft into the immutable facts used for one call.
@@ -32,7 +33,8 @@ public sealed record CallerScriptSnapshot(
             RequireValue(draft.Reason, nameof(draft.Reason)),
             RequireValue(draft.Urgency, nameof(draft.Urgency)),
             RequireValue(draft.CallbackNumber, nameof(draft.CallbackNumber)),
-            RequireValue(draft.AdditionalDetails, nameof(draft.AdditionalDetails)));
+            RequireValue(draft.AdditionalDetails, nameof(draft.AdditionalDetails)),
+            draft.LanguageSwitch?.Validated(nameof(draft.LanguageSwitch)));
     }
 
     private static string RequireValue(string value, string fieldName)

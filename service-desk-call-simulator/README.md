@@ -88,10 +88,12 @@ The checked-in defaults live in
 - English voice: `en-US-JennyNeural`
 - German recognition locale: `de-DE`
 - German voice: `de-DE-KatjaNeural`
+- Polish recognition locale: `pl-PL`
+- Polish voice: `pl-PL-ZofiaNeural`
 
 ### Presets
 
-The simulator ships with exactly eight editable presets:
+The simulator ships with exactly nine editable presets:
 
 1. `[EN] Printer not working`
 2. `[DE] Drucker funktioniert nicht`
@@ -101,9 +103,40 @@ The simulator ships with exactly eight editable presets:
 6. `[DE] E-Mail-Ausfall`
 7. `[EN] Payroll question`
 8. `[DE] Frage zur Gehaltsabrechnung`
+9. `[DE→PL] Netzwerkstörung / awaria sieci`
 
 Each preset already carries its locale and voice; there is no separate language
 selector.
+
+### Showcase preset: `[DE→PL] Netzwerkstörung / awaria sieci`
+
+The ninth preset demonstrates a **mid-call caller language switch**. It opens in
+German and switches the caller to Polish deterministically:
+
+- The opening line is spoken in German with `de-DE-KatjaNeural`.
+- After the **first finalized Service Desk transcript turn**, every generated
+  caller reply is grounded to Polish and synthesized with `pl-PL-ZofiaNeural`.
+- The locale and voice labels show the transition explicitly, for example
+  `de-DE → pl-PL (after 1 service desk turn)`.
+
+What it demonstrates:
+
+- **Deterministic, code-owned switching.** The switch is an optional
+  `CallerLanguageSwitchPolicy` carried as a first-class preset/draft/snapshot
+  fact (target locale, target voice, finalized-turn threshold). It is never
+  inferred from free-text script details, and the model is never asked whether
+  to switch.
+- **No prompt/voice drift.** `CallerResponseLanguageResolver` counts finalized
+  Service Desk turns and returns the current response locale, language name, and
+  voice. Both the grounded prompt and the caller TTS call use that single result,
+  so the prompted language and the synthesized voice always agree. Interim
+  recognition fragments never count toward the threshold.
+- **Grounded, no-invention behavior is preserved.** Each turn's prompt states the
+  exact current response language plus the already-applied transition rule, while
+  the immutable caller facts and the strict JSON decision schema stay unchanged.
+- **Recognition is unaffected.** Recognition follows the remote service desk
+  language (`de-DE` here) and is never restarted mid-call just because the caller
+  TTS language changed.
 
 ## Azure authentication and RBAC
 
@@ -238,6 +271,8 @@ overrides with the prefix `SDCS__`.
 | `Speech:English:Voice` | English neural voice |
 | `Speech:German:RecognitionLocale` | German recognition locale |
 | `Speech:German:Voice` | German neural voice |
+| `Speech:Polish:RecognitionLocale` | Polish locale used by the `[DE→PL]` switch preset |
+| `Speech:Polish:Voice` | Polish neural voice used after the switch |
 
 ### PowerShell override examples
 
@@ -247,6 +282,7 @@ $env:SDCS__Acs__PreferredCallerId = "+15551234567"
 $env:SDCS__Acs__LocalCallbackPort = "5055"
 $env:SDCS__AiServices__TextDeployment = "gpt-5.6-luna"
 $env:SDCS__Speech__German__Voice = "de-DE-KatjaNeural"
+$env:SDCS__Speech__Polish__Voice = "pl-PL-ZofiaNeural"
 ```
 
 Clear an override after the run:
@@ -348,7 +384,8 @@ reported 5146x2186 desktop.
    - If Dev Tunnel GitHub sign-in is needed, the app enters a sign-in-required
      state while the browser flow completes.
 5. **Script selection and editing**
-   - Choose one of the English or German presets.
+   - Choose one of the English or German presets, or the `[DE→PL]` preset to
+     demonstrate a mid-call switch from German to Polish.
    - Edit the script fields locally if needed.
    - If you switch presets with unsaved edits, the app asks you to confirm.
 6. **Place the call**

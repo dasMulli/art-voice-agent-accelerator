@@ -22,6 +22,11 @@ public sealed class CallerScriptDraft
 
     public string AdditionalDetails { get; set; } = string.Empty;
 
+    /// <summary>
+    /// Gets or sets the optional deterministic language switch carried by the selected preset.
+    /// </summary>
+    public CallerLanguageSwitchPolicy? LanguageSwitch { get; set; }
+
     public static CallerScriptDraft FromPreset(CallerScriptPreset preset)
     {
         ArgumentNullException.ThrowIfNull(preset);
@@ -38,6 +43,7 @@ public sealed class CallerScriptDraft
             Urgency = preset.Urgency,
             CallbackNumber = preset.CallbackNumber,
             AdditionalDetails = preset.AdditionalDetails,
+            LanguageSwitch = preset.LanguageSwitch?.Copy(),
         };
     }
 
@@ -55,6 +61,7 @@ public sealed class CallerScriptDraft
             Urgency = Urgency,
             CallbackNumber = CallbackNumber,
             AdditionalDetails = AdditionalDetails,
+            LanguageSwitch = LanguageSwitch?.Copy(),
         };
     }
 }

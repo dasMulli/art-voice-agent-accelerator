@@ -499,7 +499,7 @@ partial class MainForm
 
         PresetComboBox.Name = "PresetComboBox";
         PresetComboBox.AccessibleName = "Caller script preset";
-        PresetComboBox.AccessibleDescription = "Selects one of the eight built-in caller script presets.";
+        PresetComboBox.AccessibleDescription = "Selects one of the nine built-in caller script presets.";
         PresetComboBox.DropDownStyle = ComboBoxStyle.DropDownList;
         PresetComboBox.Dock = DockStyle.Fill;
         PresetComboBox.TabIndex = 4;

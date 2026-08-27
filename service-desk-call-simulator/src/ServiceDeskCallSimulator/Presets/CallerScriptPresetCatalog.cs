@@ -11,6 +11,7 @@ public static class CallerScriptPresetCatalog
 
         var english = settings.Speech.English;
         var german = settings.Speech.German;
+        var polish = settings.Speech.Polish;
 
         return
         [
@@ -102,6 +103,27 @@ public static class CallerScriptPresetCatalog
                 "Niedrig",
                 "+4915112345681",
                 "Eine kurze schriftliche Rückmeldung ist auch in Ordnung, falls heute kein Rückruf möglich ist."),
+
+            // Showcase preset: the caller opens in German and switches to Polish deterministically
+            // after the first finalized service-desk turn. The switch is a declared preset fact and
+            // never inferred from the free-text details below.
+            CreatePreset(
+                "[DE→PL] Netzwerkstörung / awaria sieci",
+                german.RecognitionLocale,
+                german.Voice,
+                "Guten Tag, hier spricht Ewa vom Standort Wien. Unser Standortnetz ist ausgefallen.",
+                "Ewa",
+                "Am Standort Wien sind seit heute Morgen alle Netzwerkverbindungen unterbrochen; die Kollegin spricht Deutsch und Polnisch.",
+                "Wir brauchen eine Störungsmeldung und eine Eskalation an den Netzbetrieb.",
+                "Hoch",
+                "+4915112345682",
+                "Ein Rückruf ist jederzeit möglich, solange die Mobilfunkverbindung steht.",
+                new CallerLanguageSwitchPolicy
+                {
+                    TargetLocale = polish.RecognitionLocale,
+                    TargetVoice = polish.Voice,
+                    AfterFinalServiceDeskTurns = 1,
+                }),
         ];
     }
 
@@ -115,7 +137,8 @@ public static class CallerScriptPresetCatalog
         string reason,
         string urgency,
         string callbackNumber,
-        string additionalDetails)
+        string additionalDetails,
+        CallerLanguageSwitchPolicy? languageSwitch = null)
     {
         E164PhoneNumber.EnsureValid(callbackNumber, nameof(callbackNumber));
 
@@ -131,6 +154,7 @@ public static class CallerScriptPresetCatalog
             Urgency = urgency,
             CallbackNumber = callbackNumber,
             AdditionalDetails = additionalDetails,
+            LanguageSwitch = languageSwitch?.Validated(nameof(languageSwitch)),
         };
     }
 }

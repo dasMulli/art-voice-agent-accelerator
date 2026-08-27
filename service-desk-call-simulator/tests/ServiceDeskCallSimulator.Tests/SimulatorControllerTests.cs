@@ -294,17 +294,18 @@ public sealed class SimulatorControllerTests
         Assert.Equal(0, controller.State.SelectedPresetIndex);
     }
 
-    // ---- Exactly eight presets, no independent language selector ---------------------------
+    // ---- Exactly nine presets, no independent language selector ----------------------------
 
     [Fact]
-    public void CreateDefaultPresets_ReturnsExactlyEightEntriesWithNoLanguageSelector()
+    public void CreateDefaultPresets_ReturnsExactlyNineEntriesWithNoLanguageSelector()
     {
         var settings = new Configuration.SimulatorSettings();
         var presets = CallerScriptPresetCatalog.CreateDefaultPresets(settings);
 
-        Assert.Equal(8, presets.Count);
+        Assert.Equal(9, presets.Count);
         Assert.Contains(presets, p => p.Name == "[EN] Printer not working");
         Assert.Contains(presets, p => p.Name == "[DE] Drucker funktioniert nicht");
+        Assert.Contains(presets, p => p.Name == "[DE→PL] Netzwerkstörung / awaria sieci");
 
         // The preset itself carries locale/voice; CallerScriptDraft exposes them as read-only
         // fields alongside the preset choice rather than through any separate language field.

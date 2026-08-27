@@ -529,6 +529,7 @@ public partial class MainForm : Form
             Urgency = UrgencyTextBox.Text,
             CallbackNumber = CallbackNumberTextBox.Text,
             AdditionalDetails = AdditionalDetailsTextBox.Text,
+            LanguageSwitch = current.LanguageSwitch,
         };
         _controller.UpdateDraft(updated);
     }
@@ -1145,8 +1146,8 @@ public partial class MainForm : Form
         _suppressScriptFieldEvents = true;
         try
         {
-            LocaleValueLabel.Text = draft?.Locale ?? string.Empty;
-            VoiceValueLabel.Text = draft?.Voice ?? string.Empty;
+            LocaleValueLabel.Text = CallerScriptMetadataFormatter.FormatLocale(draft);
+            VoiceValueLabel.Text = CallerScriptMetadataFormatter.FormatVoice(draft);
 
             SetTextIfChanged(IdentityTextBox, draft?.Identity ?? string.Empty);
             SetTextIfChanged(BackgroundTextBox, draft?.Background ?? string.Empty);

@@ -269,7 +269,10 @@ public sealed class ScriptedCallerOrchestrator : IAsyncDisposable
             _disconnectTask = RunGuardedAsync(WatchForMediaDisconnectAsync);
 
             AppendTranscript(TranscriptSpeaker.Caller, _script.OpeningLine, TranscriptStatus.Final);
-            await SpeakAsync(_script.OpeningLine, startupCancellation.Token).ConfigureAwait(false);
+            await SpeakAsync(
+                _script.OpeningLine,
+                ResolveResponseLanguage().Voice,
+                startupCancellation.Token).ConfigureAwait(false);
             if (!_lifetime.IsCancellationRequested)
             {
                 TransitionActivity(CallerActivityState.Listening, "Opening line completed.");
@@ -357,20 +360,25 @@ public sealed class ScriptedCallerOrchestrator : IAsyncDisposable
             }
 
             TransitionActivity(CallerActivityState.Thinking, "Waiting for a grounded caller decision.");
+            var history = FinalTranscript;
+
+            // One resolver decides both the grounded prompt language and the synthesis voice for
+            // this turn, so the spoken language can never drift from the prompted language.
+            var responseLanguage = CallerResponseLanguageResolver.Resolve(_script, history);
             var decision = await _replyGenerator.GenerateAsync(
                 _script,
-                FinalTranscript,
+                history,
                 _lifetime.Token).ConfigureAwait(false);
             if (decision.Action == GroundedReplyAction.HangUp)
             {
-                await EndAfterDecisionAsync(decision).ConfigureAwait(false);
+                await EndAfterDecisionAsync(decision, responseLanguage.Voice).ConfigureAwait(false);
                 return;
             }
 
             if (!string.IsNullOrWhiteSpace(decision.SpokenText))
             {
                 AppendTranscript(TranscriptSpeaker.Caller, decision.SpokenText, TranscriptStatus.Final);
-                await SpeakAsync(decision.SpokenText, _lifetime.Token).ConfigureAwait(false);
+                await SpeakAsync(decision.SpokenText, responseLanguage.Voice, _lifetime.Token).ConfigureAwait(false);
             }
 
             if (!_lifetime.IsCancellationRequested)
@@ -400,7 +408,7 @@ public sealed class ScriptedCallerOrchestrator : IAsyncDisposable
         }
     }
 
-    private async Task EndAfterDecisionAsync(GroundedModelDecision decision)
+    private async Task EndAfterDecisionAsync(GroundedModelDecision decision, string voice)
     {
         TransitionActivity(CallerActivityState.Ending, "The caller model completed the interaction.");
         if (!string.IsNullOrWhiteSpace(decision.SpokenText))
@@ -412,17 +420,24 @@ public sealed class ScriptedCallerOrchestrator : IAsyncDisposable
             using var drainCancellation = CancellationTokenSource.CreateLinkedTokenSource(
                 _lifetime.Token,
                 drainDeadline.Token);
-            await SpeakAsync(decision.SpokenText, drainCancellation.Token).ConfigureAwait(false);
+            await SpeakAsync(decision.SpokenText, voice, drainCancellation.Token).ConfigureAwait(false);
         }
 
         await _callSession.HangUpAsync(_lifetime.Token).ConfigureAwait(false);
         TransitionActivity(CallerActivityState.Ended, "Caller requested hang-up.");
     }
 
-    private async Task SpeakAsync(string text, CancellationToken cancellationToken)
+    /// <summary>
+    /// Resolves the caller response language for the current transcript state. Recognition of the
+    /// remote service desk is unaffected: it always stays on the script's own locale.
+    /// </summary>
+    private CallerResponseLanguage ResolveResponseLanguage() =>
+        CallerResponseLanguageResolver.Resolve(_script, FinalTranscript);
+
+    private async Task SpeakAsync(string text, string voice, CancellationToken cancellationToken)
     {
         TransitionActivity(CallerActivityState.Speaking, "Caller audio playback started.");
-        var pcm = await _speech.SynthesizeAsync(_script.Voice, text, cancellationToken)
+        var pcm = await _speech.SynthesizeAsync(voice, text, cancellationToken)
             .WaitAsync(_options.SynthesisTimeout, _timeProvider, cancellationToken)
             .ConfigureAwait(false);
         if (pcm.Length == 0 || pcm.Length % sizeof(short) != 0 || pcm.Length > _options.MaximumSynthesisBytes)

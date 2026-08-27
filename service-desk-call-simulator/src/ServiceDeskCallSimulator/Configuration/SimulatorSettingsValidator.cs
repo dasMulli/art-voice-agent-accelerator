@@ -25,6 +25,8 @@ public static class SimulatorSettingsValidator
         ValidateNonEmpty(settings.Speech.English.Voice, $"{nameof(SimulatorSettings.Speech)}.{nameof(SpeechSettings.English)}.{nameof(SpeechLocaleSettings.Voice)}", failures);
         ValidateNonEmpty(settings.Speech.German.RecognitionLocale, $"{nameof(SimulatorSettings.Speech)}.{nameof(SpeechSettings.German)}.{nameof(SpeechLocaleSettings.RecognitionLocale)}", failures);
         ValidateNonEmpty(settings.Speech.German.Voice, $"{nameof(SimulatorSettings.Speech)}.{nameof(SpeechSettings.German)}.{nameof(SpeechLocaleSettings.Voice)}", failures);
+        ValidateNonEmpty(settings.Speech.Polish.RecognitionLocale, $"{nameof(SimulatorSettings.Speech)}.{nameof(SpeechSettings.Polish)}.{nameof(SpeechLocaleSettings.RecognitionLocale)}", failures);
+        ValidateNonEmpty(settings.Speech.Polish.Voice, $"{nameof(SimulatorSettings.Speech)}.{nameof(SpeechSettings.Polish)}.{nameof(SpeechLocaleSettings.Voice)}", failures);
 
         if (failures.Count > 0)
         {

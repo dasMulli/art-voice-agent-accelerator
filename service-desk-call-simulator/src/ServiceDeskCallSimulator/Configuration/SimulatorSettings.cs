@@ -53,4 +53,10 @@ public sealed record class SpeechSettings
         RecognitionLocale = "de-DE",
         Voice = "de-DE-KatjaNeural",
     };
+
+    public SpeechLocaleSettings Polish { get; init; } = new()
+    {
+        RecognitionLocale = "pl-PL",
+        Voice = "pl-PL-ZofiaNeural",
+    };
 }

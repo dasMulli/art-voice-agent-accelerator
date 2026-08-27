@@ -29,6 +29,8 @@ public sealed class SimulatorConfigurationTests
         Assert.Equal("en-US-JennyNeural", settings.Speech.English.Voice);
         Assert.Equal("de-DE", settings.Speech.German.RecognitionLocale);
         Assert.Equal("de-DE-KatjaNeural", settings.Speech.German.Voice);
+        Assert.Equal("pl-PL", settings.Speech.Polish.RecognitionLocale);
+        Assert.Equal("pl-PL-ZofiaNeural", settings.Speech.Polish.Voice);
 
         DeleteDirectory(directory);
     }
@@ -56,6 +58,33 @@ public sealed class SimulatorConfigurationTests
     }
 
     [Fact]
+    public void LoadSettings_EnvironmentOverridesPolishSpeechConfiguration()
+    {
+        const string localeKey = "SDCS__Speech__Polish__RecognitionLocale";
+        const string voiceKey = "SDCS__Speech__Polish__Voice";
+        var previousLocale = Environment.GetEnvironmentVariable(localeKey);
+        var previousVoice = Environment.GetEnvironmentVariable(voiceKey);
+        var directory = CreateConfigurationDirectory();
+
+        try
+        {
+            Environment.SetEnvironmentVariable(localeKey, "pl-PL");
+            Environment.SetEnvironmentVariable(voiceKey, "pl-PL-MarekNeural");
+
+            var settings = SimulatorConfiguration.LoadSettingsFrom(directory);
+
+            Assert.Equal("pl-PL", settings.Speech.Polish.RecognitionLocale);
+            Assert.Equal("pl-PL-MarekNeural", settings.Speech.Polish.Voice);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(localeKey, previousLocale);
+            Environment.SetEnvironmentVariable(voiceKey, previousVoice);
+            DeleteDirectory(directory);
+        }
+    }
+
+    [Fact]
     public void LoadSettings_InvalidValuesFailValidationWithActionableFieldNames()
     {
         var configuration = new ConfigurationBuilder()
@@ -73,6 +102,8 @@ public sealed class SimulatorConfigurationTests
                 ["Speech:English:Voice"] = "",
                 ["Speech:German:RecognitionLocale"] = "",
                 ["Speech:German:Voice"] = "",
+                ["Speech:Polish:RecognitionLocale"] = "",
+                ["Speech:Polish:Voice"] = "",
             })
             .Build();
 
@@ -85,6 +116,8 @@ public sealed class SimulatorConfigurationTests
         Assert.Contains(exception.Failures, failure => failure.Contains("AiServices.Endpoint", StringComparison.Ordinal));
         Assert.Contains(exception.Failures, failure => failure.Contains("Speech.English.Voice", StringComparison.Ordinal));
         Assert.Contains(exception.Failures, failure => failure.Contains("Speech.German.RecognitionLocale", StringComparison.Ordinal));
+        Assert.Contains(exception.Failures, failure => failure.Contains("Speech.Polish.RecognitionLocale", StringComparison.Ordinal));
+        Assert.Contains(exception.Failures, failure => failure.Contains("Speech.Polish.Voice", StringComparison.Ordinal));
     }
 
     private static string CreateConfigurationDirectory()
@@ -116,6 +149,10 @@ public sealed class SimulatorConfigurationTests
                 "German": {
                   "RecognitionLocale": "de-DE",
                   "Voice": "de-DE-KatjaNeural"
+                },
+                "Polish": {
+                  "RecognitionLocale": "pl-PL",
+                  "Voice": "pl-PL-ZofiaNeural"
                 }
               }
             }

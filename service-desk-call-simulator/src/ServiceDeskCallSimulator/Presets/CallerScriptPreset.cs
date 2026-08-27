@@ -22,6 +22,12 @@ public sealed record class CallerScriptPreset
 
     public required string AdditionalDetails { get; init; }
 
+    /// <summary>
+    /// Gets the optional deterministic language switch applied during the call, or <c>null</c>
+    /// when the caller keeps <see cref="Locale"/> and <see cref="Voice"/> for the whole call.
+    /// </summary>
+    public CallerLanguageSwitchPolicy? LanguageSwitch { get; init; }
+
     public CallerScriptDraft CreateDraft()
     {
         return CallerScriptDraft.FromPreset(this);

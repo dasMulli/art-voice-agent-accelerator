@@ -32,6 +32,7 @@ public static class CallerScriptDraftComparer
             && string.Equals(left.Reason, right.Reason, StringComparison.Ordinal)
             && string.Equals(left.Urgency, right.Urgency, StringComparison.Ordinal)
             && string.Equals(left.CallbackNumber, right.CallbackNumber, StringComparison.Ordinal)
-            && string.Equals(left.AdditionalDetails, right.AdditionalDetails, StringComparison.Ordinal);
+            && string.Equals(left.AdditionalDetails, right.AdditionalDetails, StringComparison.Ordinal)
+            && left.LanguageSwitch == right.LanguageSwitch;
     }
 }
