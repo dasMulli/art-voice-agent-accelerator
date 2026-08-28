@@ -321,6 +321,33 @@ dotnet test .\service-desk-call-simulator\ServiceDeskCallSimulator.sln -c Releas
 dotnet run --project .\service-desk-call-simulator\src\ServiceDeskCallSimulator\ServiceDeskCallSimulator.csproj -c Release
 ```
 
+To publish a single-file, self-contained, untrimmed Windows executable, run:
+
+```powershell
+.\service-desk-call-simulator\build.ps1
+```
+
+To sign the executable, connect the signing token, open its middleware, and
+provide the certificate and RFC 3161 timestamp service explicitly:
+
+```powershell
+.\service-desk-call-simulator\build.ps1 --sign `
+    -CertificateThumbprint <certificate-thumbprint> `
+    -TimestampUrl <rfc3161-timestamp-url>
+```
+
+The signing path uses the x86 Windows SDK SignTool for compatibility with
+smart-card minidrivers. SignTool's own architecture does not constrain the
+architecture of the executable being signed. The token middleware may prompt
+for its PIN; the script never reads or stores the PIN.
+The executable is written to
+`service-desk-call-simulator\artifacts\publish\win-x64\ServiceDeskCallSimulator.exe`.
+For signed builds, verbose SignTool diagnostics are retained under
+`service-desk-call-simulator\artifacts\logs\`.
+
+Use `-RuntimeIdentifier win-arm64` for a native ARM64 build. `-OutputDirectory`,
+`-Configuration`, and `-SignToolPath` can override the build and tool defaults.
+
 If you want to inspect the checked-in configuration file directly:
 
 ```powershell
