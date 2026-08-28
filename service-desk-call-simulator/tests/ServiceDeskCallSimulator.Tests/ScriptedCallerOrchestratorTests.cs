@@ -85,7 +85,7 @@ public sealed class ScriptedCallerOrchestratorTests
     }
 
     [Fact]
-    public async Task OpeningLine_UsesSpeechAndMediaWithoutCallingModel()
+    public async Task OpeningLine_WaitsForFirstFinalRemoteTurnAndDoesNotCallModel()
     {
         var call = new FakeCallSession();
         var media = (FakeMediaTransport)call.CallerMediaTransport;
@@ -96,12 +96,29 @@ public sealed class ScriptedCallerOrchestratorTests
 
         await orchestrator.StartAsync();
 
+        speech.EmitInterim("Welcome to");
+        await Task.Delay(50);
+
+        Assert.Empty(speech.SynthesizedTexts);
+        Assert.Empty(media.SentFrames);
+        Assert.DoesNotContain(
+            orchestrator.Transcript,
+            turn => turn.Speaker == TranscriptSpeaker.Caller);
+
+        speech.EmitFinal("Welcome to the service desk.");
+        await EventuallyAsync(() => media.SentFrames.Count == 1);
+
         Assert.Equal(0, model.CallCount);
         Assert.Equal([CreateDraft().OpeningLine], speech.SynthesizedTexts);
         Assert.Single(media.SentFrames);
         Assert.Equal(AcsMediaTransport.PcmFrameBytes, media.SentFrames[0].Length);
         Assert.Equal(CallerActivityState.Listening, orchestrator.ActivityState);
-        Assert.Equal(TranscriptSpeaker.Caller, Assert.Single(orchestrator.Transcript).Speaker);
+        Assert.Equal(
+            [TranscriptSpeaker.ServiceDesk, TranscriptSpeaker.Caller],
+            orchestrator.Transcript
+                .Where(turn => turn.Status == TranscriptStatus.Final)
+                .Select(turn => turn.Speaker)
+                .ToArray());
     }
 
     [Fact]
@@ -121,6 +138,8 @@ public sealed class ScriptedCallerOrchestratorTests
         var timeProvider = new CapturingTimeProvider();
         await using var orchestrator = CreateOrchestrator(call, model, speech, monitor, timeProvider);
         await orchestrator.StartAsync();
+        speech.EmitFinal("Welcome.");
+        await EventuallyAsync(() => media.SentFrames.Count == 1);
         media.ClearSent();
         monitor.Clear();
 
@@ -130,9 +149,36 @@ public sealed class ScriptedCallerOrchestratorTests
 
         Assert.All(media.SentFrames, frame => Assert.Equal(AcsMediaTransport.PcmFrameBytes, frame.Length));
         Assert.Equal(0, media.SentFrames[1][10]);
-        Assert.Contains(TimeSpan.FromMilliseconds(20), timeProvider.ScheduledDueTimes);
+        Assert.Contains(
+            timeProvider.ScheduledDueTimes,
+            dueTime => dueTime > TimeSpan.Zero && dueTime <= TimeSpan.FromMilliseconds(20));
         Assert.Equal(1, model.MaximumConcurrentCalls);
-        Assert.Equal(2, monitor.Frames.Count);
+        Assert.Equal(2, monitor.OutboundFrames.Count);
+    }
+
+    [Fact]
+    public async Task FramePacing_DoesNotAddSendLatencyToTwentyMillisecondDeadlines()
+    {
+        var call = new FakeCallSession();
+        var media = (FakeMediaTransport)call.CallerMediaTransport;
+        var timeProvider = new AutoAdvancingTimeProvider();
+        media.BeforeSend = () => timeProvider.Advance(TimeSpan.FromMilliseconds(7));
+        var speech = new FakeSpeechPipeline
+        {
+            Synthesis = _ => new byte[AcsMediaTransport.PcmFrameBytes * 10],
+        };
+        await using var orchestrator = CreateOrchestrator(
+            call,
+            new FakeReplyGenerator(),
+            speech,
+            new FakeAudioMonitor(),
+            timeProvider);
+
+        await orchestrator.StartAsync();
+        speech.EmitFinal("Welcome.");
+        await EventuallyAsync(() => media.SentFrames.Count == 10);
+
+        Assert.Equal(TimeSpan.FromMilliseconds(187), timeProvider.Elapsed);
     }
 
     [Fact]
@@ -150,6 +196,8 @@ public sealed class ScriptedCallerOrchestratorTests
             speech,
             new FakeAudioMonitor());
         await orchestrator.StartAsync();
+        speech.EmitFinal("Welcome.", "greeting");
+        await EventuallyAsync(() => speech.SynthesizedTexts.Count == 1);
 
         speech.EmitInterim("Can you");
         speech.EmitFinal("Can you help?", "segment-1");
@@ -185,6 +233,8 @@ public sealed class ScriptedCallerOrchestratorTests
             speech,
             new FakeAudioMonitor());
         await orchestrator.StartAsync();
+        speech.EmitFinal("Welcome.", "greeting");
+        await EventuallyAsync(() => speech.SynthesizedTexts.Count == 1);
 
         speech.EmitFinal("Can you help?", "segment-1");
         speech.EmitFinal("What details do you need?", "segment-2");
@@ -242,7 +292,8 @@ public sealed class ScriptedCallerOrchestratorTests
             new FakeReplyGenerator(),
             speech,
             monitor);
-        var start = orchestrator.StartAsync();
+        await orchestrator.StartAsync();
+        speech.EmitFinal("Welcome.");
 
         await media.BlockedSendStarted.Task.WaitAsync(TimeSpan.FromSeconds(3));
         monitor.Clear();
@@ -254,7 +305,7 @@ public sealed class ScriptedCallerOrchestratorTests
         Assert.Empty(monitor.Frames);
 
         media.ReleaseBlockedSend();
-        await start;
+        await EventuallyAsync(() => orchestrator.ActivityState == CallerActivityState.Listening);
 
         media.PublishInbound(CreateTone(9), isSilent: false);
 
@@ -280,8 +331,12 @@ public sealed class ScriptedCallerOrchestratorTests
             monitor);
 
         await orchestrator.StartAsync();
+        speech.EmitFinal("Welcome.");
+        await EventuallyAsync(() => monitor.OutboundFrames.Count == 1);
 
-        Assert.Equal(new byte[AcsMediaTransport.PcmFrameBytes], Assert.Single(monitor.Frames));
+        Assert.Equal(
+            new byte[AcsMediaTransport.PcmFrameBytes],
+            Assert.Single(monitor.OutboundFrames));
     }
 
     [Fact]
@@ -297,6 +352,8 @@ public sealed class ScriptedCallerOrchestratorTests
         await using var orchestrator = CreateOrchestrator(call, model, speech, monitor);
         await orchestrator.StartAsync();
 
+        speech.EmitFinal("Welcome.");
+        await EventuallyAsync(() => speech.SynthesizedTexts.Count == 1);
         speech.EmitFinal("What is your asset number?");
 
         await EventuallyAsync(() => orchestrator.ActivityState == CallerActivityState.Faulted);
@@ -324,6 +381,8 @@ public sealed class ScriptedCallerOrchestratorTests
         var speech = new FakeSpeechPipeline();
         await using var orchestrator = CreateOrchestrator(call, model, speech, new FakeAudioMonitor());
         await orchestrator.StartAsync();
+        speech.EmitFinal("Welcome.");
+        await EventuallyAsync(() => speech.SynthesizedTexts.Count == 1);
 
         speech.EmitFinal("First question");
         await model.FirstCallStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
@@ -355,6 +414,8 @@ public sealed class ScriptedCallerOrchestratorTests
         };
         await using var orchestrator = CreateOrchestrator(call, model, speech, new FakeAudioMonitor());
         await orchestrator.StartAsync();
+        speech.EmitFinal("Welcome.");
+        await EventuallyAsync(() => media.SentFrames.Count == 1);
         media.ClearSent();
         media.BlockOnSendCall = 3;
 
@@ -387,6 +448,8 @@ public sealed class ScriptedCallerOrchestratorTests
         await using var orchestrator = CreateOrchestrator(call, model, speech, new FakeAudioMonitor());
         orchestrator.ActivityChanged += (_, change) => activities.Add(change.CurrentState);
         await orchestrator.StartAsync();
+        speech.EmitFinal("Welcome.");
+        await EventuallyAsync(() => media.SentFrames.Count == 1);
         media.ClearSent();
 
         speech.EmitFinal("Goodbye.");
@@ -600,8 +663,10 @@ public sealed class ScriptedCallerOrchestratorTests
             new FakeAudioMonitor());
         await orchestrator.StartAsync();
 
+        speech.EmitFinal("Welcome to the service desk.", "greeting");
+        await EventuallyAsync(() => speech.SynthesizedTexts.Count == 1);
         speech.EmitInterim("Which dev");
-        speech.EmitFinal("Which device has the problem?", "segment-1");
+        speech.EmitFinal("Which device has the problem?", "question-1");
 
         await EventuallyAsync(() => model.CallCount == 1);
 
@@ -659,12 +724,15 @@ public sealed class ScriptedCallerOrchestratorTests
             script: CallerScriptSnapshot.FromDraft(CreateSwitchingDraft()));
         await orchestrator.StartAsync();
 
-        Assert.Equal(["de-DE-KatjaNeural"], speech.SynthesizedVoices);
+        Assert.Empty(speech.SynthesizedVoices);
 
         speech.EmitFinal("Welches Netz ist betroffen?", "segment-1");
-        await EventuallyAsync(() => speech.SynthesizedVoices.Count == 2);
+        await EventuallyAsync(() => speech.SynthesizedVoices.Count == 1);
 
         speech.EmitFinal("Seit wann besteht die Störung?", "segment-2");
+        await EventuallyAsync(() => speech.SynthesizedVoices.Count == 2);
+
+        speech.EmitFinal("Welche Standorte sind betroffen?", "segment-3");
         await EventuallyAsync(() => speech.SynthesizedVoices.Count == 3);
 
         Assert.Equal(
@@ -690,6 +758,8 @@ public sealed class ScriptedCallerOrchestratorTests
         await orchestrator.StartAsync();
 
         speech.EmitFinal("Welches Netz ist betroffen?", "segment-1");
+        await EventuallyAsync(() => speech.SynthesizedVoices.Count == 1);
+        speech.EmitFinal("Seit wann besteht die Störung?", "segment-2");
         await EventuallyAsync(() => speech.SynthesizedVoices.Count == 2);
 
         Assert.Equal(["de-DE"], speech.RecognitionLocales);
@@ -708,6 +778,8 @@ public sealed class ScriptedCallerOrchestratorTests
         await using var orchestrator = CreateOrchestrator(call, model, speech, new FakeAudioMonitor());
         await orchestrator.StartAsync();
 
+        speech.EmitFinal("Willkommen beim Service Desk.", "greeting");
+        await EventuallyAsync(() => speech.SynthesizedVoices.Count == 1);
         speech.EmitFinal("Welches Gerät ist betroffen?", "segment-1");
         await EventuallyAsync(() => speech.SynthesizedVoices.Count == 2);
 
@@ -849,6 +921,8 @@ public sealed class ScriptedCallerOrchestratorTests
 
         public int SendsAfterStop { get; private set; }
 
+        public Action? BeforeSend { get; set; }
+
         public TaskCompletionSource BlockedSendStarted { get; } =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
 
@@ -860,6 +934,7 @@ public sealed class ScriptedCallerOrchestratorTests
             CancellationToken cancellationToken = default)
         {
             Assert.Equal(AcsMediaTransport.PcmFrameBytes, pcm16KMono.Length);
+            BeforeSend?.Invoke();
             var call = Interlocked.Increment(ref _sendCalls);
             if (BlockOnSendCall == call)
             {
@@ -1062,6 +1137,8 @@ public sealed class ScriptedCallerOrchestratorTests
 
         public List<byte[]> Frames { get; } = [];
 
+        public List<byte[]> OutboundFrames { get; } = [];
+
         public int StopCalls { get; private set; }
 
         public bool Disposed { get; private set; }
@@ -1084,6 +1161,16 @@ public sealed class ScriptedCallerOrchestratorTests
             return true;
         }
 
+        public bool TryMonitorOutbound(ReadOnlyMemory<byte> pcm16KMono)
+        {
+            if (!IsMuted)
+            {
+                OutboundFrames.Add(pcm16KMono.ToArray());
+            }
+
+            return true;
+        }
+
         public Task StopAsync()
         {
             StopCalls++;
@@ -1097,7 +1184,11 @@ public sealed class ScriptedCallerOrchestratorTests
             return ValueTask.CompletedTask;
         }
 
-        public void Clear() => Frames.Clear();
+        public void Clear()
+        {
+            Frames.Clear();
+            OutboundFrames.Clear();
+        }
     }
 
     private sealed class CapturingTimeProvider : TimeProvider
@@ -1118,6 +1209,49 @@ public sealed class ScriptedCallerOrchestratorTests
         {
             ScheduledDueTimes.Add(dueTime);
             return TimeProvider.System.CreateTimer(callback, state, dueTime, period);
+        }
+    }
+
+    private sealed class AutoAdvancingTimeProvider : TimeProvider
+    {
+        private long _timestamp;
+
+        public TimeSpan Elapsed => TimeSpan.FromTicks(Interlocked.Read(ref _timestamp));
+
+        public override DateTimeOffset GetUtcNow() => DateTimeOffset.UnixEpoch + Elapsed;
+
+        public override long GetTimestamp() => Interlocked.Read(ref _timestamp);
+
+        public override long TimestampFrequency => TimeSpan.TicksPerSecond;
+
+        public void Advance(TimeSpan duration) =>
+            Interlocked.Add(ref _timestamp, duration.Ticks);
+
+        public override ITimer CreateTimer(
+            TimerCallback callback,
+            object? state,
+            TimeSpan dueTime,
+            TimeSpan period)
+        {
+            if (dueTime > TimeSpan.FromMilliseconds(500))
+            {
+                return TimeProvider.System.CreateTimer(callback, state, dueTime, period);
+            }
+
+            Advance(dueTime);
+            _ = Task.Run(() => callback(state));
+            return new NoOpTimer();
+        }
+
+        private sealed class NoOpTimer : ITimer
+        {
+            public bool Change(TimeSpan dueTime, TimeSpan period) => true;
+
+            public void Dispose()
+            {
+            }
+
+            public ValueTask DisposeAsync() => ValueTask.CompletedTask;
         }
     }
 }

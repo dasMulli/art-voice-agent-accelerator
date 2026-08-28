@@ -45,6 +45,28 @@ public sealed class FaultIsolatingAudioMonitorTests
         Assert.True(monitor.TryMonitor(new byte[640]));
     }
 
+    [Fact]
+    public async Task RuntimeFault_DoesNotRunDeviceCleanupInlineOnTheCallbackThread()
+    {
+        using var releaseStop = new ManualResetEventSlim();
+        var inner = new FakeAudioMonitor { StopBlocker = releaseStop };
+        await using var monitor = new FaultIsolatingAudioMonitor(inner);
+
+        var callback = Task.Run(() => inner.RaiseFault("playback", "device callback failed"));
+        try
+        {
+            var completed = await Task.WhenAny(callback, Task.Delay(500));
+            Assert.Same(callback, completed);
+        }
+        finally
+        {
+            releaseStop.Set();
+            await callback;
+        }
+
+        await EventuallyAsync(() => inner.Disposed);
+    }
+
     private static async Task EventuallyAsync(Func<bool> condition)
     {
         var timeout = DateTime.UtcNow + TimeSpan.FromSeconds(2);
@@ -64,6 +86,8 @@ public sealed class FaultIsolatingAudioMonitorTests
         public bool IsMuted { get; set; }
 
         public bool ThrowOnTryMonitor { get; init; }
+
+        public ManualResetEventSlim? StopBlocker { get; init; }
 
         public List<byte[]> Frames { get; } = [];
 
@@ -89,6 +113,7 @@ public sealed class FaultIsolatingAudioMonitorTests
         public Task StopAsync()
         {
             StopCalls++;
+            StopBlocker?.Wait();
             return Task.CompletedTask;
         }
 

@@ -1,3 +1,5 @@
+using NAudio.Wave;
+using ServiceDeskCallSimulator.Media;
 using ServiceDeskCallSimulator.Monitoring;
 
 namespace ServiceDeskCallSimulator.Tests;
@@ -5,286 +7,217 @@ namespace ServiceDeskCallSimulator.Tests;
 public sealed class WaveOutAudioMonitorTests
 {
     [Fact]
-    public async Task BoundedQueueAndMute_AffectOnlyLocalWaveOutPlayback()
+    public async Task BufferedPlayback_UsesBoundedPcmProvider()
     {
-        var native = new FakeWaveOutNative();
+        var player = new FakeWavePlayer();
         await using var monitor = new WaveOutAudioMonitor(
-            new WaveOutAudioMonitorOptions { MaximumBufferedFrames = 1 },
-            native);
+            new WaveOutAudioMonitorOptions
+            {
+                MaximumBufferedFrames = 3,
+                BufferMilliseconds = 20,
+                NumberOfBuffers = 2,
+            },
+            player);
+
+        var provider = Assert.IsType<BufferedWaveProvider>(player.Provider);
+        Assert.Equal(16_000, provider.WaveFormat.SampleRate);
+        Assert.Equal(16, provider.WaveFormat.BitsPerSample);
+        Assert.Equal(1, provider.WaveFormat.Channels);
+        Assert.Equal(AcsMediaTransport.PcmFrameBytes * 3, provider.BufferLength);
+        Assert.True(provider.ReadFully);
+        Assert.False(provider.DiscardOnBufferOverflow);
+
+        Assert.True(monitor.TryMonitor(new byte[AcsMediaTransport.PcmFrameBytes]));
+        Assert.Equal(0, player.PlayCalls);
+        Assert.True(monitor.TryMonitor(new byte[AcsMediaTransport.PcmFrameBytes]));
+        Assert.Equal(1, player.PlayCalls);
+        Assert.Equal(AcsMediaTransport.PcmFrameBytes * 2, provider.BufferedBytes);
+
+        await monitor.StopAsync();
+
+        Assert.Equal(1, player.StopCalls);
+        Assert.Equal(0, provider.BufferedBytes);
+    }
+
+    [Fact]
+    public async Task BoundedBufferAndMute_AffectOnlyLocalPlayback()
+    {
+        var player = new FakeWavePlayer();
+        await using var monitor = new WaveOutAudioMonitor(
+            new WaveOutAudioMonitorOptions
+            {
+                MaximumBufferedFrames = 2,
+                BufferMilliseconds = 20,
+                NumberOfBuffers = 2,
+            },
+            player);
+        var provider = Assert.IsType<BufferedWaveProvider>(player.Provider);
 
         monitor.IsMuted = true;
-        Assert.True(monitor.TryMonitor(new byte[640]));
-        await Task.Delay(30);
-        Assert.Empty(native.Device.Written);
+        Assert.True(monitor.TryMonitor(new byte[AcsMediaTransport.PcmFrameBytes]));
+        Assert.Equal(0, provider.BufferedBytes);
+        Assert.Equal(0, player.PlayCalls);
 
         monitor.IsMuted = false;
-        Assert.True(monitor.TryMonitor(new byte[640]));
-        await EventuallyAsync(() => native.Device.Written.Count == 1);
-        Assert.False(monitor.TryMonitor(new byte[640]));
-
-        native.Device.CompleteAll();
-        await EventuallyAsync(() => native.Device.Unprepared.Count == 1);
-
-        Assert.Equal(1, native.OpenCalls);
-        Assert.Equal(16_000, native.Format!.SamplesPerSecond);
-        Assert.Equal((short)16, native.Format.BitsPerSample);
-        Assert.Equal((short)1, native.Format.Channels);
+        Assert.True(monitor.TryMonitor(new byte[AcsMediaTransport.PcmFrameBytes]));
+        Assert.True(monitor.TryMonitor(new byte[AcsMediaTransport.PcmFrameBytes]));
+        Assert.False(monitor.TryMonitor(new byte[AcsMediaTransport.PcmFrameBytes]));
+        Assert.Equal(1, player.PlayCalls);
     }
 
     [Fact]
-    public async Task StopAndDispose_ResetAndReleaseOnlyOwnedDeviceBuffers()
+    public async Task OutboundReservation_PreventsInboundAudioFromConsumingTheWholeBuffer()
     {
-        var native = new FakeWaveOutNative();
+        var player = new FakeWavePlayer();
+        await using var monitor = new WaveOutAudioMonitor(
+            new WaveOutAudioMonitorOptions
+            {
+                MaximumBufferedFrames = 3,
+                ReservedOutboundFrames = 1,
+                BufferMilliseconds = 20,
+                NumberOfBuffers = 2,
+            },
+            player);
+
+        Assert.True(monitor.TryMonitor(new byte[AcsMediaTransport.PcmFrameBytes]));
+        Assert.True(monitor.TryMonitor(new byte[AcsMediaTransport.PcmFrameBytes]));
+        Assert.False(monitor.TryMonitor(new byte[AcsMediaTransport.PcmFrameBytes]));
+
+        Assert.True(monitor.TryMonitorOutbound(new byte[AcsMediaTransport.PcmFrameBytes]));
+        Assert.False(monitor.TryMonitorOutbound(new byte[AcsMediaTransport.PcmFrameBytes]));
+    }
+
+    [Fact]
+    public async Task UnexpectedPlaybackFailure_RaisesOneSafeFault()
+    {
+        var player = new FakeWavePlayer();
+        await using var monitor = new WaveOutAudioMonitor(
+            new WaveOutAudioMonitorOptions(),
+            player);
+        var faults = new List<AudioMonitorFault>();
+        monitor.Faulted += (_, fault) => faults.Add(fault);
+
+        player.RaisePlaybackStopped(new InvalidOperationException("driver details"));
+
+        var fault = Assert.Single(faults);
+        Assert.Equal("playback", fault.Operation);
+        Assert.Equal("The local NAudio output device stopped unexpectedly.", fault.Message);
+    }
+
+    [Fact]
+    public async Task StopAndDispose_AreIdempotent()
+    {
+        var player = new FakeWavePlayer();
         var monitor = new WaveOutAudioMonitor(
-            new WaveOutAudioMonitorOptions { MaximumBufferedFrames = 2 },
-            native);
+            new WaveOutAudioMonitorOptions(),
+            player);
 
-        Assert.True(monitor.TryMonitor(new byte[640]));
-        await EventuallyAsync(() => native.Device.Written.Count == 1);
-
+        Assert.True(monitor.TryMonitor(new byte[AcsMediaTransport.PcmFrameBytes]));
+        await monitor.StopAsync();
         await monitor.StopAsync();
         await monitor.DisposeAsync();
-
-        Assert.Equal(1, native.Device.ResetCalls);
-        Assert.Single(native.Device.Unprepared);
-        Assert.True(native.Device.Disposed);
-    }
-
-    [Fact]
-    public async Task Reservation_RetainsCapacityWhileADequeuedBufferBecomesInFlight()
-    {
-        var native = new FakeWaveOutNative();
-        var dequeued = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        using var releaseDequeue = new ManualResetEventSlim();
-        var monitor = new WaveOutAudioMonitor(
-            new WaveOutAudioMonitorOptions { MaximumBufferedFrames = 1 },
-            native,
-            () =>
-            {
-                dequeued.TrySetResult();
-                releaseDequeue.Wait();
-            });
-
-        try
-        {
-            Assert.True(monitor.TryMonitor(new byte[640]));
-            await dequeued.Task.WaitAsync(TimeSpan.FromSeconds(2));
-
-            Assert.False(monitor.TryMonitor(new byte[640]));
-
-            releaseDequeue.Set();
-            await EventuallyAsync(() => native.Device.Written.Count == 1);
-        }
-        finally
-        {
-            releaseDequeue.Set();
-            await monitor.DisposeAsync();
-        }
-    }
-
-    [Fact]
-    public async Task WomDoneCallback_DefersUnprepareOffTheDeviceCallbackThread()
-    {
-        var native = new FakeWaveOutNative();
-        await using var monitor = new WaveOutAudioMonitor(
-            new WaveOutAudioMonitorOptions { MaximumBufferedFrames = 4 },
-            native);
-
-        Assert.True(monitor.TryMonitor(new byte[640]));
-        await EventuallyAsync(() => native.Device.Written.Count == 1);
-
-        native.Device.CompleteAll();
-        await EventuallyAsync(() => native.Device.Unprepared.Count == 1);
-
-        // The winmm callback contract forbids waveOutUnprepareHeader inside WOM_DONE.
-        Assert.Empty(native.Device.UnpreparesInsideCallback);
-    }
-
-    [Fact]
-    public async Task ResetDeliveredCallbacks_ReleaseEachBufferExactlyOnceAfterResetReturns()
-    {
-        var native = new FakeWaveOutNative();
-        native.Device.CompleteWrittenBuffersDuringReset = true;
-        var monitor = new WaveOutAudioMonitor(
-            new WaveOutAudioMonitorOptions { MaximumBufferedFrames = 4 },
-            native);
-
-        Assert.True(monitor.TryMonitor(new byte[640]));
-        Assert.True(monitor.TryMonitor(new byte[640]));
-        await EventuallyAsync(() => native.Device.Written.Count == 2);
-
-        await monitor.StopAsync();
-
-        Assert.Equal(1, native.Device.ResetCalls);
-        Assert.Equal(2, native.Device.Unprepared.Count);
-        Assert.Equal(2, native.Device.Unprepared.Distinct().Count());
-        Assert.Empty(native.Device.UnpreparesInsideCallback);
-        Assert.Empty(native.Device.UnpreparesInsideReset);
-        Assert.Equal(new[] { "reset", "unprepare", "unprepare" }, native.Device.Operations.ToArray());
-
         await monitor.DisposeAsync();
-        Assert.Equal(2, native.Device.Unprepared.Count);
+
+        Assert.Equal(1, player.StopCalls);
+        Assert.Equal(1, player.DisposeCalls);
     }
 
     [Fact]
-    public async Task RepeatedCompletionForOneBuffer_ReleasesItExactlyOnce()
+    public void InitializationFailure_DisposesTheOwnedPlayer()
     {
-        var native = new FakeWaveOutNative();
-        await using var monitor = new WaveOutAudioMonitor(
-            new WaveOutAudioMonitorOptions { MaximumBufferedFrames = 2 },
-            native);
+        var player = new FakeWavePlayer { InitException = new InvalidOperationException("init failed") };
 
-        Assert.True(monitor.TryMonitor(new byte[640]));
-        await EventuallyAsync(() => native.Device.Written.Count == 1);
+        Assert.Throws<InvalidOperationException>(() =>
+            new WaveOutAudioMonitor(new WaveOutAudioMonitorOptions(), player));
 
-        native.Device.CompleteAll();
-        await EventuallyAsync(() => native.Device.Unprepared.Count == 1);
-        native.Device.CompleteAll();
-        await Task.Delay(50);
-
-        Assert.Single(native.Device.Unprepared);
-
-        // The reservation for the released buffer was returned exactly once.
-        Assert.True(monitor.TryMonitor(new byte[640]));
-        Assert.True(monitor.TryMonitor(new byte[640]));
+        Assert.Equal(1, player.DisposeCalls);
     }
 
-    private static async Task EventuallyAsync(Func<bool> condition)
+    [Fact]
+    public void NativeBufferWindowLargerThanProvider_IsRejected()
     {
-        var deadline = DateTimeOffset.UtcNow + TimeSpan.FromSeconds(2);
-        while (!condition())
+        var options = new WaveOutAudioMonitorOptions
         {
-            if (DateTimeOffset.UtcNow >= deadline)
-            {
-                throw new TimeoutException("The expected asynchronous condition was not reached.");
-            }
+            MaximumBufferedFrames = 3,
+            BufferMilliseconds = 40,
+            NumberOfBuffers = 2,
+        };
 
-            await Task.Delay(10);
-        }
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            new WaveOutAudioMonitor(options, new FakeWavePlayer()));
     }
 
-    private sealed class FakeWaveOutNative : IWaveOutNative
+    [Theory]
+    [InlineData(0, 100, 3)]
+    [InlineData(1, 0, 3)]
+    [InlineData(1, 100, 1)]
+    public void InvalidBufferOptions_AreRejected(
+        int maximumBufferedFrames,
+        int bufferMilliseconds,
+        int numberOfBuffers)
     {
-        public int OpenCalls { get; private set; }
-
-        public WaveOutFormat? Format { get; private set; }
-
-        public FakeWaveOutDevice Device { get; } = new();
-
-        public IWaveOutDevice Open(WaveOutFormat format, Action<WaveOutBuffer> completed)
+        var options = new WaveOutAudioMonitorOptions
         {
-            OpenCalls++;
-            Format = format;
-            Device.Completed = completed;
-            return Device;
-        }
+            MaximumBufferedFrames = maximumBufferedFrames,
+            BufferMilliseconds = bufferMilliseconds,
+            NumberOfBuffers = numberOfBuffers,
+        };
+
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            new WaveOutAudioMonitor(options, new FakeWavePlayer()));
     }
 
-    private sealed class FakeWaveOutDevice : IWaveOutDevice
+    private sealed class FakeWavePlayer : IWavePlayer
     {
-        [ThreadStatic]
-        private static int _callbackDepth;
+        public IWaveProvider? Provider { get; private set; }
 
-        [ThreadStatic]
-        private static int _resetDepth;
+        public int PlayCalls { get; private set; }
 
-        private readonly object _sync = new();
+        public int StopCalls { get; private set; }
 
-        public Action<WaveOutBuffer>? Completed { get; set; }
+        public int DisposeCalls { get; private set; }
 
-        public List<WaveOutBuffer> Written { get; } = [];
+        public Exception? InitException { get; init; }
 
-        public List<WaveOutBuffer> Unprepared { get; } = [];
+        public float Volume { get; set; } = 1.0f;
 
-        public List<WaveOutBuffer> UnpreparesInsideCallback { get; } = [];
+        public PlaybackState PlaybackState { get; private set; } = PlaybackState.Stopped;
 
-        public List<WaveOutBuffer> UnpreparesInsideReset { get; } = [];
+        public WaveFormat OutputWaveFormat => Provider?.WaveFormat ?? new WaveFormat(16_000, 16, 1);
 
-        public List<string> Operations { get; } = [];
+        public event EventHandler<StoppedEventArgs>? PlaybackStopped;
 
-        public bool CompleteWrittenBuffersDuringReset { get; set; }
-
-        public int ResetCalls { get; private set; }
-
-        public bool Disposed { get; private set; }
-
-        public void PrepareAndWrite(WaveOutBuffer buffer)
+        public void Init(IWaveProvider waveProvider)
         {
-            lock (_sync)
+            if (InitException is not null)
             {
-                Written.Add(buffer);
+                throw InitException;
             }
+
+            Provider = waveProvider;
         }
 
-        public void Unprepare(WaveOutBuffer buffer)
+        public void Play()
         {
-            // Reentrancy is measured per thread: a call that appears while this same thread is
-            // inside WOM_DONE or waveOutReset is exactly the forbidden native-boundary violation.
-            var insideCallback = _callbackDepth > 0;
-            var insideReset = _resetDepth > 0;
-            lock (_sync)
-            {
-                Unprepared.Add(buffer);
-                Operations.Add("unprepare");
-                if (insideCallback)
-                {
-                    UnpreparesInsideCallback.Add(buffer);
-                }
-
-                if (insideReset)
-                {
-                    UnpreparesInsideReset.Add(buffer);
-                }
-            }
+            PlayCalls++;
+            PlaybackState = PlaybackState.Playing;
         }
 
-        public void Reset()
+        public void Pause() => PlaybackState = PlaybackState.Paused;
+
+        public void Stop()
         {
-            lock (_sync)
-            {
-                ResetCalls++;
-                Operations.Add("reset");
-            }
-
-            if (!CompleteWrittenBuffersDuringReset)
-            {
-                return;
-            }
-
-            // winmm delivers WOM_DONE for every queued buffer while waveOutReset is executing.
-            _resetDepth++;
-            try
-            {
-                CompleteAll();
-            }
-            finally
-            {
-                _resetDepth--;
-            }
+            StopCalls++;
+            PlaybackState = PlaybackState.Stopped;
+            PlaybackStopped?.Invoke(this, new StoppedEventArgs());
         }
 
-        public void Dispose() => Disposed = true;
+        public void Dispose() => DisposeCalls++;
 
-        public void CompleteAll()
+        public void RaisePlaybackStopped(Exception exception)
         {
-            WaveOutBuffer[] buffers;
-            lock (_sync)
-            {
-                buffers = Written.ToArray();
-            }
-
-            _callbackDepth++;
-            try
-            {
-                foreach (var buffer in buffers)
-                {
-                    Completed?.Invoke(buffer);
-                }
-            }
-            finally
-            {
-                _callbackDepth--;
-            }
+            PlaybackState = PlaybackState.Stopped;
+            PlaybackStopped?.Invoke(this, new StoppedEventArgs(exception));
         }
     }
 }

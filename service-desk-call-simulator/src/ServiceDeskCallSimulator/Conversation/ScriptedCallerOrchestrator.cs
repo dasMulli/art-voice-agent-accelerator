@@ -64,6 +64,7 @@ public sealed record ScriptedCallerOrchestratorOptions
 /// </summary>
 public sealed class ScriptedCallerOrchestrator : IAsyncDisposable
 {
+    private static readonly TimeSpan PcmFrameDuration = TimeSpan.FromMilliseconds(20);
     private readonly CallerScriptSnapshot _script;
     private readonly ICallerCallSession _callSession;
     private readonly ICallMediaTransport _mediaTransport;
@@ -93,6 +94,7 @@ public sealed class ScriptedCallerOrchestrator : IAsyncDisposable
     private Playback? _activePlayback;
     private Exception? _terminalCleanupFailure;
     private CallerActivityState _activity = CallerActivityState.Idle;
+    private bool _openingLineSent;
     private int _faulted;
 
     /// <summary>
@@ -213,7 +215,7 @@ public sealed class ScriptedCallerOrchestrator : IAsyncDisposable
     public event EventHandler<CallerActivityChange>? ActivityChanged;
 
     /// <summary>
-    /// Starts recognition, media consumption, and the deterministic opening line.
+    /// Starts recognition and media consumption while waiting for the remote greeting to finish.
     /// </summary>
     public Task StartAsync(CancellationToken cancellationToken = default)
     {
@@ -268,14 +270,11 @@ public sealed class ScriptedCallerOrchestrator : IAsyncDisposable
             _recognitionTask = RunGuardedAsync(ProcessRecognitionUpdatesAsync);
             _disconnectTask = RunGuardedAsync(WatchForMediaDisconnectAsync);
 
-            AppendTranscript(TranscriptSpeaker.Caller, _script.OpeningLine, TranscriptStatus.Final);
-            await SpeakAsync(
-                _script.OpeningLine,
-                ResolveResponseLanguage().Voice,
-                startupCancellation.Token).ConfigureAwait(false);
             if (!_lifetime.IsCancellationRequested)
             {
-                TransitionActivity(CallerActivityState.Listening, "Opening line completed.");
+                TransitionActivity(
+                    CallerActivityState.Listening,
+                    "Waiting for the service desk greeting to finish.");
             }
         }
         catch (OperationCanceledException) when (_lifetime.IsCancellationRequested
@@ -356,6 +355,19 @@ public sealed class ScriptedCallerOrchestrator : IAsyncDisposable
         {
             if (_lifetime.IsCancellationRequested)
             {
+                return;
+            }
+
+            if (!_openingLineSent)
+            {
+                _openingLineSent = true;
+                AppendTranscript(TranscriptSpeaker.Caller, _script.OpeningLine, TranscriptStatus.Final);
+                await SpeakAsync(_script.OpeningLine, _script.Voice, _lifetime.Token).ConfigureAwait(false);
+                if (!_lifetime.IsCancellationRequested)
+                {
+                    TransitionActivity(CallerActivityState.Listening, "Opening line completed.");
+                }
+
                 return;
             }
 
@@ -473,13 +485,26 @@ public sealed class ScriptedCallerOrchestrator : IAsyncDisposable
         _monitorSource.BeginOutbound();
         try
         {
+            var playbackStartedAt = _timeProvider.GetTimestamp();
+            var frameIndex = 0;
             for (var offset = 0; offset < pcm.Length; offset += AcsMediaTransport.PcmFrameBytes)
             {
                 playbackCancellation.Token.ThrowIfCancellationRequested();
+                if (frameIndex > 0)
+                {
+                    var targetElapsed = TimeSpan.FromTicks(PcmFrameDuration.Ticks * frameIndex);
+                    var remaining = targetElapsed - _timeProvider.GetElapsedTime(playbackStartedAt);
+                    if (remaining > TimeSpan.Zero)
+                    {
+                        await Task.Delay(remaining, _timeProvider, playbackCancellation.Token)
+                            .ConfigureAwait(false);
+                    }
+                }
+
                 var frame = new byte[AcsMediaTransport.PcmFrameBytes];
                 var count = Math.Min(frame.Length, pcm.Length - offset);
                 Buffer.BlockCopy(pcm, offset, frame, 0, count);
-                _audioMonitor.TryMonitor(frame);
+                _audioMonitor.TryMonitorOutbound(frame);
 
                 await _mediaTransport.SendAudioAsync(playback.Generation, frame, playbackCancellation.Token)
                     .WaitAsync(
@@ -487,11 +512,7 @@ public sealed class ScriptedCallerOrchestrator : IAsyncDisposable
                         _timeProvider,
                         playbackCancellation.Token)
                     .ConfigureAwait(false);
-                if (offset + frame.Length < pcm.Length)
-                {
-                    await Task.Delay(TimeSpan.FromMilliseconds(20), _timeProvider, playbackCancellation.Token)
-                        .ConfigureAwait(false);
-                }
+                frameIndex++;
             }
         }
         catch (OperationCanceledException) when (playback.Cancellation.IsCancellationRequested

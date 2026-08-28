@@ -28,10 +28,13 @@ High-level flow:
    16 kHz PCM media streaming.
 6. Run the scripted caller conversation:
    - speech recognition on inbound service-desk audio;
+   - wait for the first finalized service-desk greeting before speaking the
+     caller's opening line;
    - grounded reply generation constrained to the selected preset facts;
    - speech synthesis for caller responses;
-   - optional local listen-along playback that can be muted without affecting
-     the real call audio.
+   - absolute-deadline delivery of 640-byte PCM frames at the ACS 20 ms cadence;
+   - optional NAudio-buffered local listen-along playback for both service-desk
+     and caller audio that can be muted without affecting the real call audio.
 
 ## Prerequisites
 
@@ -114,6 +117,8 @@ The ninth preset demonstrates a **mid-call caller language switch**. It opens in
 German and switches the caller to Polish deterministically:
 
 - The opening line is spoken in German with `de-DE-KatjaNeural`.
+- It is spoken only after the first finalized Service Desk transcript turn, so
+  it does not talk over the remote greeting.
 - After the **first finalized Service Desk transcript turn**, every generated
   caller reply is grounded to Polish and synthesized with `pl-PL-ZofiaNeural`.
 - The locale and voice labels show the transition explicitly, for example
@@ -321,11 +326,17 @@ dotnet test .\service-desk-call-simulator\ServiceDeskCallSimulator.sln -c Releas
 dotnet run --project .\service-desk-call-simulator\src\ServiceDeskCallSimulator\ServiceDeskCallSimulator.csproj -c Release
 ```
 
-To publish a single-file, self-contained, untrimmed Windows executable, run:
+To publish single-file, self-contained, untrimmed Windows executables for both
+x64 and ARM64, run:
 
 ```powershell
 .\service-desk-call-simulator\build.ps1
 ```
+
+The executables are written to:
+
+- `service-desk-call-simulator\artifacts\publish\win-x64\ServiceDeskCallSimulator.exe`
+- `service-desk-call-simulator\artifacts\publish\win-arm64\ServiceDeskCallSimulator.exe`
 
 To sign the executable, connect the signing token, open its middleware, and
 provide the certificate and RFC 3161 timestamp service explicitly:
@@ -336,17 +347,37 @@ provide the certificate and RFC 3161 timestamp service explicitly:
     -TimestampUrl <rfc3161-timestamp-url>
 ```
 
+You can instead configure the signing values once as user-level environment
+variables. New terminals inherit these values, and explicit script parameters
+still take precedence:
+
+```powershell
+[Environment]::SetEnvironmentVariable(
+    "CODE_SIGNING_CERTIFICATE_THUMBPRINT",
+    "<certificate-thumbprint>",
+    "User"
+)
+[Environment]::SetEnvironmentVariable(
+    "CODE_SIGNING_TIMESTAMP_URL",
+    "<rfc3161-timestamp-url>",
+    "User"
+)
+
+.\service-desk-call-simulator\build.ps1 --sign
+```
+
 The signing path uses the x86 Windows SDK SignTool for compatibility with
 smart-card minidrivers. SignTool's own architecture does not constrain the
 architecture of the executable being signed. The token middleware may prompt
 for its PIN; the script never reads or stores the PIN.
-The executable is written to
-`service-desk-call-simulator\artifacts\publish\win-x64\ServiceDeskCallSimulator.exe`.
 For signed builds, verbose SignTool diagnostics are retained under
 `service-desk-call-simulator\artifacts\logs\`.
 
-Use `-RuntimeIdentifier win-arm64` for a native ARM64 build. `-OutputDirectory`,
-`-Configuration`, and `-SignToolPath` can override the build and tool defaults.
+Use `-RuntimeIdentifier win-x64` or `-RuntimeIdentifier win-arm64` to build only
+one architecture. `-OutputDirectory`, `-Configuration`, and `-SignToolPath` can
+override the build and tool defaults. With both architectures selected, a
+custom output directory is treated as a root containing `win-x64` and
+`win-arm64` subdirectories.
 
 If you want to inspect the checked-in configuration file directly:
 
@@ -426,6 +457,11 @@ reported 5146x2186 desktop.
      speaker while the caller speaks, and audible remote audio is played the
      rest of the time. Silent comfort frames are never played locally. This
      affects only local listen-along, not the PSTN call or recognition.
+   - Local playback uses NAudio with bounded 16 kHz, 16-bit, mono PCM buffering.
+     It prebuffers the native output window before playback to absorb scheduler
+     jitter without inserting silence between frames. ACS delivery uses its own
+     absolute playback clock, so WebSocket send time is not added to every
+     20 ms frame interval.
 8. **Hang up or let the conversation finish**
    - Use **Hang Up** for a manual end.
    - The grounded caller can also end the call naturally.
@@ -571,6 +607,10 @@ Actions:
 - check the Windows output device;
 - verify **Mute local audio** is off;
 - review diagnostics for a local audio monitor fault;
+- confirm the current build includes NAudio-buffered playback and
+  absolute-deadline ACS frame pacing;
+- caller audio has reserved monitor capacity, so sustained inbound playback
+  cannot starve locally generated responses;
 - the real PSTN call can continue even if local playback is disabled.
 
 ### Destination does not answer or wrong scenario answers

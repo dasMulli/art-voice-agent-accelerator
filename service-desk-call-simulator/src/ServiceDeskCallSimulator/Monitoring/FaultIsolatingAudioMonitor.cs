@@ -44,6 +44,13 @@ public sealed class FaultIsolatingAudioMonitor : IAudioMonitor
 
     /// <inheritdoc />
     public bool TryMonitor(ReadOnlyMemory<byte> pcm16KMono)
+        => TryMonitorCore(monitor => monitor.TryMonitor(pcm16KMono));
+
+    /// <inheritdoc />
+    public bool TryMonitorOutbound(ReadOnlyMemory<byte> pcm16KMono)
+        => TryMonitorCore(monitor => monitor.TryMonitorOutbound(pcm16KMono));
+
+    private bool TryMonitorCore(Func<IAudioMonitor, bool> tryMonitor)
     {
         IAudioMonitor monitor;
         lock (_sync)
@@ -53,7 +60,7 @@ public sealed class FaultIsolatingAudioMonitor : IAudioMonitor
 
         try
         {
-            return monitor.TryMonitor(pcm16KMono);
+            return tryMonitor(monitor);
         }
         catch (Exception exception) when (exception is InvalidOperationException
             or ObjectDisposedException
@@ -133,7 +140,8 @@ public sealed class FaultIsolatingAudioMonitor : IAudioMonitor
             var replacement = new NullAudioMonitor { IsMuted = monitor.IsMuted };
             monitor.Faulted -= OnInnerMonitorFaulted;
             _current = replacement;
-            cleanup = _failedMonitorCleanup ??= StopAndDisposeFailedMonitorAsync(monitor);
+            cleanup = _failedMonitorCleanup ??= Task.Run(
+                () => StopAndDisposeFailedMonitorAsync(monitor));
         }
 
         try

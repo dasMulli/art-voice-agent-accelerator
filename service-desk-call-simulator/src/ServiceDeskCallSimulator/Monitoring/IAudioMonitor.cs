@@ -26,6 +26,11 @@ public interface IAudioMonitor : IAsyncDisposable
     bool TryMonitor(ReadOnlyMemory<byte> pcm16KMono);
 
     /// <summary>
+    /// Attempts to queue outbound caller PCM using capacity reserved from inbound monitoring.
+    /// </summary>
+    bool TryMonitorOutbound(ReadOnlyMemory<byte> pcm16KMono) => TryMonitor(pcm16KMono);
+
+    /// <summary>
     /// Stops and resets the local device, discarding only local playback buffers.
     /// </summary>
     Task StopAsync();
